@@ -38,6 +38,39 @@
 	/* Required for bootloader to select correct board */
 	qcom,board-id = <30 0>;
 
+	chosen {
+		#address-cells = <2>;
+		#size-cells = <2>;
+		ranges;
+
+		/*
+		 * Keep using the framebuffer set up by the XBL bootloader so we get
+		 * a working (simplefb/simpledrm) console on screen before any real
+		 * MDSS/DSI panel driver is in place.
+		 */
+		framebuffer0: framebuffer@9d400000 {
+			compatible = "simple-framebuffer";
+			reg = <0x0 0x9d400000 0x0 0x2400000>;
+			width = <1080>;
+			height = <1920>;
+			stride = <(1080 * 4)>;
+			format = "a8r8g8b8";
+			/*
+			 * A lot of clocks, but needed because of unused clk cleanup
+			 * and no panel driver yet.
+			 */
+			clocks = <&mmcc MDSS_AHB_CLK>,
+				 <&mmcc MDSS_AXI_CLK>,
+				 <&mmcc MDSS_VSYNC_CLK>,
+				 <&mmcc MDSS_MDP_CLK>,
+				 <&mmcc MDSS_BYTE0_CLK>,
+				 <&mmcc MDSS_BYTE0_INTF_CLK>,
+				 <&mmcc MDSS_PCLK0_CLK>,
+				 <&mmcc MDSS_ESC0_CLK>;
+			power-domains = <&mmcc MDSS_GDSC>;
+		};
+	};
+
 	reserved-memory {
 		/*
 		 * Xiaomi's ADSP firmware requires 30 MiB in total, so increase the adsp_mem
