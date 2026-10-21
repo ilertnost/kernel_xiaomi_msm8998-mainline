@@ -196,9 +196,18 @@
 	disp_vddts_vreg: disp-vddts-regulator {
 		compatible = "regulator-fixed";
 		regulator-name = "disp-vddts-regulator";
-		gpio = <&tlmm 50 GPIO_ACTIVE_HIGH>;
-		enable-active-high;
+		/* GPIO50 low = rail on: drives the panel and the touch
+		 * controller. Keep it on so the bootloader state is preserved. */
+		gpio = <&tlmm 50 GPIO_ACTIVE_LOW>;
+		regulator-always-on;
 		regulator-boot-on;
+	};
+
+	battery: battery {
+		compatible = "simple-battery";
+		voltage-min-design-microvolt = <4200000>;
+		voltage-max-design-microvolt = <4400000>;
+		charge-full-design-microamp = <3000000>;
 	};
 };
 
@@ -223,7 +232,7 @@
 		vio-supply = <&vreg_l6a_1p8>;
 
 		syna,reset-delay-ms = <20>;
-		syna,startup-delay-ms = <20>;
+		syna,startup-delay-ms = <200>;
 
 		rmi4-f01@1 {
 			reg = <0x01>;
@@ -633,6 +642,9 @@
 		function = "gpio";
 		drive-strength = <16>;
 		bias-pull-up;
+		/* Without input-enable the pins keep the direction the bootloader
+		 * left behind (output low = touch held in reset). */
+		input-enable;
 	};
 
 	ts_int_suspend_state: ts-int-suspend-state {
@@ -719,4 +731,135 @@
 	vdd-1.3-rfa-supply = <&vreg_l17a_1p3>;
 	vdd-3.3-ch0-supply = <&vreg_l25a_3p3>;
 	status = "okay";
+};
+
+/*
+ * Display and GPU, ported from the msm8998-mainline community tree
+ * (gitlab.com/msm8998-mainline/linux: arch/arm64/boot/dts/qcom/
+ * msm8998-xiaomi-sagit.dts) and adapted to the node labels of this kernel.
+ */
+
+&mmcc {
+	status = "okay";
+};
+
+&mmss_smmu {
+	status = "okay";
+};
+
+&mdss {
+	status = "okay";
+};
+
+&mdss_mdp {
+	status = "okay";
+};
+
+&mdss_dsi0 {
+	status = "okay";
+
+	vdd-supply = <&vreg_l1a_0p875>;
+	vdda-supply = <&vreg_l2a_1p2>;
+
+
+	pinctrl-names = "default", "sleep";
+	pinctrl-0 = <&mdss_dsi_active_state &mdss_te_state>;
+	pinctrl-1 = <&mdss_dsi_suspend_state &mdss_te_state>;
+
+	panel: panel@0 {
+		compatible = "jdi,fhd-r63452";
+		reg = <0>;
+
+		backlight = <&pmi8998_wled>;
+		reset-gpios = <&tlmm 94 GPIO_ACTIVE_LOW>;
+		disp-te-gpios = <&tlmm 10 GPIO_ACTIVE_LOW>;
+
+		ibb-supply = <&ibb>;
+		lab-supply = <&lab>;
+		vddio-supply = <&vreg_l14a_1p8>;
+
+		port {
+			panel_in: endpoint {
+				remote-endpoint = <&mdss_dsi0_out>;
+			};
+		};
+	};
+};
+
+&mdss_dsi0_out {
+	remote-endpoint = <&panel_in>;
+	data-lanes = <0 1 2 3>;
+};
+
+&mdss_dsi0_phy {
+	status = "okay";
+	vdds-supply = <&vreg_l1a_0p875>;
+};
+
+&pmi8998_wled {
+	status = "okay";
+
+	default-brightness = <800>;
+	qcom,switching-freq = <800>;
+	qcom,ovp-millivolt = <29600>;
+	qcom,current-boost-limit = <970>;
+	qcom,current-limit-microamp = <25000>;
+	/* Only one of num-strings / enabled-strings may be given. */
+	qcom,enabled-strings = <0 1 2 3>;
+};
+
+&ibb {
+	regulator-min-microvolt = <4600000>;
+	regulator-max-microvolt = <6000000>;
+	regulator-min-microamp = <800000>;
+	regulator-max-microamp = <800000>;
+	regulator-enable-ramp-delay = <200>;
+	regulator-over-current-protection;
+	regulator-pull-down;
+	regulator-ramp-delay = <1>;
+	regulator-settling-time-up-us = <600>;
+	regulator-settling-time-down-us = <1000>;
+	regulator-soft-start;
+	qcom,discharge-resistor-kohms = <300>;
+	regulator-always-on;
+};
+
+&lab {
+	regulator-min-microvolt = <4600000>;
+	regulator-max-microvolt = <6000000>;
+	qcom,soft-start-us = <800>;
+	regulator-min-microamp = <200000>;
+	regulator-max-microamp = <200000>;
+	regulator-enable-ramp-delay = <500>;
+	regulator-over-current-protection;
+	regulator-pull-down;
+	regulator-ramp-delay = <1>;
+	regulator-settling-time-up-us = <50000>;
+	regulator-settling-time-down-us = <3000>;
+	regulator-soft-start;
+	regulator-always-on;
+};
+
+&pmi8998_charger {
+	status = "okay";
+	monitored-battery = <&battery>;
+};
+
+/*
+ * Adreno 540 GPU: not usable yet. There is no zap shader firmware
+ * (a540_zap.mbn) and CONFIG_MSM_GPUCC_8998 is disabled, so the GPUCC
+ * power domain never comes up. Keeping the GPU and its SMMU enabled
+ * only makes arm-smmu time out (-110) and leaves gcc sync_state()
+ * pending forever. Keep the whole GPU block off.
+ */
+&gpucc {
+	status = "disabled";
+};
+
+&adreno_gpu {
+	status = "disabled";
+};
+
+&adreno_smmu {
+	status = "disabled";
 };
