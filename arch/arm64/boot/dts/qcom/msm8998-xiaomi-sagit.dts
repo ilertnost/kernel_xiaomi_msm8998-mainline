@@ -850,20 +850,48 @@
 };
 
 /*
- * Adreno 540 GPU: not usable yet. There is no zap shader firmware
- * (a540_zap.mbn) and CONFIG_MSM_GPUCC_8998 is disabled, so the GPUCC
- * power domain never comes up. Keeping the GPU and its SMMU enabled
- * only makes arm-smmu time out (-110) and leaves gcc sync_state()
- * pending forever. Keep the whole GPU block off.
+ * Adreno 540 GPU.
+ *
+ * The zap shader is provided by firmware-xiaomi-sagit as
+ * qcom/msm8998/xiaomi/a540_zap.mbn and has to be present in the
+ * initramfs, because msm.ko is loaded from there.
+ *
+ * We are lacking support for the GPU regulator. Hence, disable higher
+ * frequencies for now to prevent the platform from hanging on high
+ * graphics loads.
  */
 &gpucc {
-	status = "disabled";
+	status = "okay";
+};
+
+&gpu_mem {
+	compatible = "shared-dma-pool";
 };
 
 &adreno_gpu {
-	status = "disabled";
+	status = "okay";
+
+	zap-shader {
+		memory-region = <&zap_shader_region>;
+		firmware-name = "qcom/msm8998/xiaomi/a540_zap.mbn";
+	};
+
+	opp-table {
+		/delete-node/ opp-710000097;
+		/delete-node/ opp-670000048;
+		/delete-node/ opp-596000097;
+		/delete-node/ opp-515000097;
+	};
 };
 
 &adreno_smmu {
-	status = "disabled";
+	status = "okay";
+};
+
+/*
+ * HACK: Shoot GPU voltage high to stabilize Adreno 540 at high
+ * frequencies until the GPU CPR is brought up.
+ */
+&pm8005_s1 {
+	regulator-min-microvolt = <988000>;
 };
