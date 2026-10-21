@@ -588,6 +588,28 @@ static int qcom_cpufreq_hw_cpu_init(struct cpufreq_policy *policy)
 	index = args.args[0];
 	data = &qcom_cpufreq.data[index];
 
+	/* DEBUG: dump the OSM LUT (read-only) */
+	{
+		const struct qcom_cpufreq_soc_data *sd = qcom_cpufreq.soc_data;
+		u32 smask = sd->reg_freq_lut_src_mask ?: (u32)LUT_SRC;
+		u32 en = readl_relaxed(data->base + sd->reg_enable);
+		u32 i;
+
+		dev_info(dev, "DEBUG domain%d: enable_reg(%#x)=%#x xo=%lu alt=%lu\n",
+			 index, sd->reg_enable, en, xo_rate, cpu_hw_rate);
+		for (i = 0; i < sd->lut_max_entries; i++) {
+			u32 fw = readl_relaxed(data->base + sd->reg_freq_lut + i * sd->lut_row_size);
+			u32 vw = readl_relaxed(data->base + sd->reg_volt_lut + i * sd->lut_row_size);
+			u32 src = (fw & smask) >> __ffs(smask);
+			u32 lval = fw & GENMASK(7, 0);
+			u32 cc = (fw >> 16) & 0x7;
+			u32 freq = src ? xo_rate * lval / 1000 : cpu_hw_rate / 1000;
+
+			dev_info(dev, "DEBUG domain%d LUT[%2u] fw=%#010x vw=%#010x src=%u lval=%u cc=%u -> %u kHz, %u mV\n",
+				 index, i, fw, vw, src, lval, cc, freq, (vw & GENMASK(11, 0)));
+		}
+	}
+
 	/* HW should be in enabled state to proceed */
 	if (!(readl_relaxed(data->base + qcom_cpufreq.soc_data->reg_enable) & 0x1)) {
 		dev_err(dev, "Domain-%d cpufreq hardware not enabled\n", index);
