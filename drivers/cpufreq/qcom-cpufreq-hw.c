@@ -450,15 +450,15 @@ static const struct qcom_cpufreq_soc_data shikra_epss_soc_data = {
 };
 
 /*
- * MSM8998: one OSM instance per cluster. The frequency/voltage LUTs live in
- * the "freq-domain" block at +0x154/+0x158, the performance state register in
- * the "osm-domain" block at +0xf10, so map the whole 0x2000 window per domain.
+ * MSM8998: one OSM instance per cluster.  All registers the driver needs
+ * (enable, frequency/voltage LUT at +0x154/+0x158 and the performance state
+ * at +0xf10) live in the per-cluster "freq-domain" block.
  */
 static const struct qcom_cpufreq_soc_data msm8998_soc_data = {
 	.reg_enable = 0x4,
-	.reg_freq_lut = 0x1154,
+	.reg_freq_lut = 0x154,
 	.reg_freq_lut_src_mask = GENMASK(27, 26),
-	.reg_volt_lut = 0x1158,
+	.reg_volt_lut = 0x158,
 	.reg_perf_state = 0xf10,
 	.lut_row_size = 32,
 	.lut_max_entries = LUT_MAX_ENTRIES,
