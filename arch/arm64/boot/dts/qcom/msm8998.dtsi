@@ -138,6 +138,7 @@
 		#size-cells = <0>;
 
 		cpu0: cpu@0 {
+			qcom,freq-domain = <&cpufreq_hw 0>;
 			device_type = "cpu";
 			compatible = "qcom,kryo280";
 			reg = <0x0 0x0>;
@@ -153,6 +154,7 @@
 		};
 
 		cpu1: cpu@1 {
+			qcom,freq-domain = <&cpufreq_hw 0>;
 			device_type = "cpu";
 			compatible = "qcom,kryo280";
 			reg = <0x0 0x1>;
@@ -163,6 +165,7 @@
 		};
 
 		cpu2: cpu@2 {
+			qcom,freq-domain = <&cpufreq_hw 0>;
 			device_type = "cpu";
 			compatible = "qcom,kryo280";
 			reg = <0x0 0x2>;
@@ -173,6 +176,7 @@
 		};
 
 		cpu3: cpu@3 {
+			qcom,freq-domain = <&cpufreq_hw 0>;
 			device_type = "cpu";
 			compatible = "qcom,kryo280";
 			reg = <0x0 0x3>;
@@ -183,6 +187,7 @@
 		};
 
 		cpu4: cpu@100 {
+			qcom,freq-domain = <&cpufreq_hw 1>;
 			device_type = "cpu";
 			compatible = "qcom,kryo280";
 			reg = <0x0 0x100>;
@@ -198,6 +203,7 @@
 		};
 
 		cpu5: cpu@101 {
+			qcom,freq-domain = <&cpufreq_hw 1>;
 			device_type = "cpu";
 			compatible = "qcom,kryo280";
 			reg = <0x0 0x101>;
@@ -208,6 +214,7 @@
 		};
 
 		cpu6: cpu@102 {
+			qcom,freq-domain = <&cpufreq_hw 1>;
 			device_type = "cpu";
 			compatible = "qcom,kryo280";
 			reg = <0x0 0x102>;
@@ -218,6 +225,7 @@
 		};
 
 		cpu7: cpu@103 {
+			qcom,freq-domain = <&cpufreq_hw 1>;
 			device_type = "cpu";
 			compatible = "qcom,kryo280";
 			reg = <0x0 0x103>;
@@ -3288,6 +3296,21 @@
 				qcom,remote-pid = <2>;
 				mboxes = <&apcs_glb 9>;
 			};
+		};
+
+		cpufreq_hw: cpufreq@179c0000 {
+			compatible = "qcom,msm8998-cpufreq-hw";
+			reg = <0x179c0000 0x2000>, <0x179c2000 0x2000>;
+
+			clocks = <&rpmcc RPM_SMD_XO_A_CLK_SRC>,
+				 <&gcc HMSS_GPLL0_CLK_SRC>;
+			clock-names = "xo", "alternate";
+
+			assigned-clocks = <&gcc HMSS_GPLL0_CLK_SRC>;
+			assigned-clock-rates = <300000000>;
+
+			#freq-domain-cells = <1>;
+			#clock-cells = <1>;
 		};
 
 		apcs_glb: mailbox@17911000 {

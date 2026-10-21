@@ -37,12 +37,14 @@ struct qcom_cpufreq_soc_data {
 	u32 reg_domain_state;
 	u32 reg_dcvs_ctrl;
 	u32 reg_freq_lut;
+	u32 reg_freq_lut_src_mask;
 	u32 reg_volt_lut;
 	u32 reg_intr_clr;
 	u32 reg_current_vote;
 	u32 reg_perf_state;
 	u32 lut_max_entries;
 	u8 lut_row_size;
+	u8 clk_hw_div;
 };
 
 struct qcom_cpufreq_data {
@@ -239,9 +241,11 @@ static int qcom_cpufreq_hw_read_lut(struct device *cpu_dev,
 	}
 
 	for (i = 0; i < soc_data->lut_max_entries; i++) {
+		u32 src_mask = soc_data->reg_freq_lut_src_mask ?: (u32)LUT_SRC;
+
 		data = readl_relaxed(drv_data->base + soc_data->reg_freq_lut +
 				      i * soc_data->lut_row_size);
-		src = FIELD_GET(LUT_SRC, data);
+		src = (data & src_mask) >> __ffs(src_mask);
 		lval = FIELD_GET(LUT_L_VAL, data);
 		core_count = FIELD_GET(LUT_CORE_COUNT, data);
 
@@ -253,6 +257,17 @@ static int qcom_cpufreq_hw_read_lut(struct device *cpu_dev,
 			freq = xo_rate * lval / 1000;
 		else
 			freq = cpu_hw_rate / 1000;
+
+		/*
+		 * Sanity check: a mis-decoded LUT (wrong stride/mask) would make
+		 * us program bogus performance states.  Refuse to register then.
+		 */
+		if (freq < 100000 || freq > 3200000) {
+			dev_err(cpu_dev, "LUT entry %u decodes to bogus %u kHz, aborting\n",
+				i, freq);
+			kfree(table);
+			return -EINVAL;
+		}
 
 		if (freq != prev_freq && core_count != LUT_TURBO_IND) {
 			if (!qcom_cpufreq_update_opp(cpu_dev, freq, volt)) {
@@ -434,7 +449,24 @@ static const struct qcom_cpufreq_soc_data shikra_epss_soc_data = {
 	.lut_max_entries = 12,
 };
 
+/*
+ * MSM8998: one OSM instance per cluster. The frequency/voltage LUTs live in
+ * the "freq-domain" block at +0x154/+0x158, the performance state register in
+ * the "osm-domain" block at +0xf10, so map the whole 0x2000 window per domain.
+ */
+static const struct qcom_cpufreq_soc_data msm8998_soc_data = {
+	.reg_enable = 0x4,
+	.reg_freq_lut = 0x1154,
+	.reg_freq_lut_src_mask = GENMASK(27, 26),
+	.reg_volt_lut = 0x1158,
+	.reg_perf_state = 0xf10,
+	.lut_row_size = 32,
+	.lut_max_entries = LUT_MAX_ENTRIES,
+	.clk_hw_div = 1,
+};
+
 static const struct of_device_id qcom_cpufreq_hw_match[] = {
+	{ .compatible = "qcom,msm8998-cpufreq-hw", .data = &msm8998_soc_data },
 	{ .compatible = "qcom,cpufreq-hw", .data = &qcom_soc_data },
 	{ .compatible = "qcom,cpufreq-epss", .data = &epss_soc_data },
 	{ .compatible = "qcom,shikra-epss", .data = &shikra_epss_soc_data },
@@ -655,6 +687,10 @@ static int qcom_cpufreq_hw_driver_probe(struct platform_device *pdev)
 	struct clk *clk;
 	int ret, i, num_domains;
 
+	qcom_cpufreq.soc_data = of_device_get_match_data(dev);
+	if (!qcom_cpufreq.soc_data)
+		return -ENODEV;
+
 	clk = clk_get(dev, "xo");
 	if (IS_ERR(clk))
 		return PTR_ERR(clk);
@@ -666,7 +702,8 @@ static int qcom_cpufreq_hw_driver_probe(struct platform_device *pdev)
 	if (IS_ERR(clk))
 		return PTR_ERR(clk);
 
-	cpu_hw_rate = clk_get_rate(clk) / CLK_HW_DIV;
+	cpu_hw_rate = clk_get_rate(clk) /
+		      (qcom_cpufreq.soc_data->clk_hw_div ?: CLK_HW_DIV);
 	clk_put(clk);
 
 	cpufreq_qcom_hw_driver.driver_data = pdev;
@@ -688,10 +725,6 @@ static int qcom_cpufreq_hw_driver_probe(struct platform_device *pdev)
 					 GFP_KERNEL);
 	if (!qcom_cpufreq.data)
 		return -ENOMEM;
-
-	qcom_cpufreq.soc_data = of_device_get_match_data(dev);
-	if (!qcom_cpufreq.soc_data)
-		return -ENODEV;
 
 	clk_data = devm_kzalloc(dev, struct_size(clk_data, hws, num_domains), GFP_KERNEL);
 	if (!clk_data)
