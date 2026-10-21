@@ -196,9 +196,11 @@
 	disp_vddts_vreg: disp-vddts-regulator {
 		compatible = "regulator-fixed";
 		regulator-name = "disp-vddts-regulator";
-		/* GPIO50 low = rail on: drives the panel and the touch
-		 * controller. Keep it on so the bootloader state is preserved. */
-		gpio = <&tlmm 50 GPIO_ACTIVE_LOW>;
+		/* Panel + touch I/O rail, enabled by driving GPIO50 high. Keep it
+		 * on: the panel driver does not request it, and the touch driver
+		 * only probes much later (from the rootfs). */
+		gpio = <&tlmm 50 GPIO_ACTIVE_HIGH>;
+		enable-active-high;
 		regulator-always-on;
 		regulator-boot-on;
 	};
@@ -444,9 +446,11 @@
 			regulator-max-microvolt = <2960000>;
 		};
 
+		/* Panel I/O rail (vddio). No driver requests it yet, keep it on. */
 		vreg_l14a_1p8: l14 {
 			regulator-min-microvolt = <1800000>;
 			regulator-max-microvolt = <1800000>;
+			regulator-always-on;
 		};
 
 		vreg_l15a_1p8: l15 {
