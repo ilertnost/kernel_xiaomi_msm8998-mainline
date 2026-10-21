@@ -1159,7 +1159,19 @@ static void dpu_crtc_reset(struct drm_crtc *crtc)
  */
 static struct drm_crtc_state *dpu_crtc_duplicate_state(struct drm_crtc *crtc)
 {
-	struct dpu_crtc_state *cstate, *old_cstate = to_dpu_crtc_state(crtc->state);
+	struct dpu_crtc_state *cstate, *old_cstate;
+
+	/*
+	 * The display snapshot code can run before the first atomic state has
+	 * been installed, for example when the bootloader framebuffer still
+	 * generates IOMMU faults while the KMS is being initialized.  That
+	 * used to crash in kmemdup() with a NULL source pointer, which left
+	 * the DRM locks held and prevented fbdev from being set up.
+	 */
+	if (!crtc->state)
+		return NULL;
+
+	old_cstate = to_dpu_crtc_state(crtc->state);
 
 	cstate = kmemdup(old_cstate, sizeof(*old_cstate), GFP_KERNEL);
 	if (!cstate) {
