@@ -2053,6 +2053,47 @@ out:
 		iounmap(itm);
 }
 
+/*
+ * Dump the blocks that are not part of the OSM register window but control
+ * it: the APCS "LMH/OSM" root clock (`apcs_common`, the vendor programs the
+ * RCG at +0x12c from GPLL0), the APM voltage muxes and the two ACD blocks.
+ * Read only, so this is safe on a parked OSM.
+ */
+static void qcom_cpufreq_hw_osm_aux_dump(void)
+{
+	void __iomem *p;
+	int i;
+
+	p = ioremap(0x179d1000, 0x1000);
+	if (p) {
+		for (i = 0x100; i < 0x160; i += 4)
+			pr_info("qcom-cpufreq: apcs_common[%#x]=%#010x\n", i,
+				readl_relaxed(p + i));
+		iounmap(p);
+	}
+
+	p = ioremap(0x179d0000, 0x1000);
+	if (p) {
+		for (i = 0; i < 0x40; i += 4)
+			pr_info("qcom-cpufreq: apm[%#x]=%#010x\n", i,
+				readl_relaxed(p + i));
+		iounmap(p);
+	}
+
+	for (i = 0; i < 2; i++) {
+		u32 base = i ? 0x17814800 : 0x17914800;
+		int o;
+
+		p = ioremap(base, 0x100);
+		if (!p)
+			continue;
+		for (o = 0; o < 0xa0; o += 4)
+			pr_info("qcom-cpufreq: acd%d[%#x]=%#010x\n", i, o,
+				readl_relaxed(p + o));
+		iounmap(p);
+	}
+}
+
 static void qcom_cpufreq_dump_regs(int index)
 {
 	struct qcom_cpufreq_data *ddata = &qcom_cpufreq.data[index];
@@ -2175,6 +2216,9 @@ static ssize_t osm_test_store(struct device *dev,
 	case 'D':
 		for (i = 0; i < qcom_cpufreq.num_domains; i++)
 			qcom_cpufreq_hw_osm_page(i);
+		return count;
+	case 'k':
+		qcom_cpufreq_hw_osm_aux_dump();
 		return count;
 	case 's':
 		for (i = 0; i < qcom_cpufreq.num_domains; i++)
