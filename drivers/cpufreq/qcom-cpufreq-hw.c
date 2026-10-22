@@ -1889,6 +1889,36 @@ static struct platform_driver qcom_cpufreq_hw_driver = {
 	},
 };
 
+/*
+ * Park the OSM before rebooting.
+ *
+ * The OSM block is not reset by a PSCI system reset, so an enabled OSM (and
+ * the microcode uploaded into its program memory) is still running when the
+ * bootloader takes over and programs the CPU PLLs.  The two fight over the
+ * clock tree and the boot hangs with no console and no USB.  Drop both
+ * clusters to their slowest state and switch the machines off first.
+ */
+static void qcom_cpufreq_hw_osm_park(void)
+{
+	int i;
+
+	for (i = 0; i < qcom_cpufreq.num_domains; i++) {
+		struct qcom_cpufreq_data *ddata = &qcom_cpufreq.data[i];
+
+		if (!ddata->base)
+			continue;
+
+		writel_relaxed(0, ddata->base + 0x150);
+		msleep(50);
+		writel_relaxed(0, ddata->base + 0x4);
+
+		pr_info("qcom-cpufreq: osm%d parked, enable=%#x perf_state=%#x vote=%#x\n",
+			i, readl_relaxed(ddata->base + 0x4),
+			readl_relaxed(ddata->base + 0xf10),
+			readl_relaxed(ddata->base + 0x704));
+	}
+}
+
 /* Dump the OSM/PLL/APCS/APM/ITM state, used for OSM bring-up debugging */
 static void qcom_cpufreq_dump_hw(int index)
 {
@@ -2076,6 +2106,9 @@ static ssize_t osm_test_store(struct device *dev,
 	case 'p':
 		for (i = 0; i < qcom_cpufreq.num_domains; i++)
 			qcom_cpufreq_dump_hw(i);
+		return count;
+	case 'q':
+		qcom_cpufreq_hw_osm_park();
 		return count;
 	}
 
