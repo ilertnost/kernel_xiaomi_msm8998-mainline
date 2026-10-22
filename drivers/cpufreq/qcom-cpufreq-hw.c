@@ -1420,6 +1420,77 @@ static int qcom_cpufreq_hw_pll_init(struct platform_device *pdev,
  * OSM is enabled, otherwise a performance state request is accepted but
  * never reaches the PLL and the cluster keeps running at the boot rate.
  */
+/*
+ * msm8998 OSM sequencer firmware.
+ *
+ * The OSM on this SoC has no boot ROM: the vendor driver uploads this exact
+ * program into the sequencer SRAM before it writes any of the configuration
+ * slots (APM addresses, threshold corners, ...).  Mainline only ever wrote
+ * the slots, so the sequencer had our lookup table and thresholds but no code
+ * to execute - which is why the clusters stayed on the GPLL0 fallback while
+ * the per-CPU vote register happily reported the requested index.
+ */
+#define OSM_SEQ_PROG_OFF	0x500
+#define OSM_SEQ_BR_OFF		0x170
+#define OSM_SEQ_BASE_OFF	0x300
+
+/* OSM sequencer program (150 words) */
+static const u32 msm8998_osm_seq_prog[] = {
+	0xc2005000, 0x2c9e3b21, 0xc0ab2cdc, 0xc2882525, 0x359dc491, 0x700a500b,
+	0x5001aefc, 0xaefd7000, 0x390938c8, 0xcb44c833, 0xce56cd54, 0x341336e0,
+	0xa4baadba, 0xb480a493, 0x10004000, 0x70005001, 0x1000500c, 0xc792c5a1,
+	0x501625e1, 0x3da335a2, 0x50170006, 0x50150006, 0x1000c633, 0x1000acb3,
+	0xc422acb4, 0xaefc1000, 0x700a500b, 0x70005001, 0x5010aefd, 0x5012700b,
+	0xad41700c, 0x84e5adb9, 0xb3808566, 0x239b0003, 0x856484e3, 0xb9800007,
+	0x2bad0003, 0xac3aa20b, 0x0003181b, 0x0003bb40, 0xa30d239b, 0x500c181b,
+	0x5011500f, 0x181b3413, 0x853984b9, 0x0003bd80, 0xa0012ba4, 0x72050803,
+	0x500e1000, 0x500c1000, 0x1c011c0a, 0x3b181c06, 0x1c073b43, 0x1c061000,
+	0x1c073983, 0x1c02500c, 0x10001c0a, 0x70015002, 0x81031000, 0x70025003,
+	0x70035004, 0x3b441000, 0x81553985, 0x70025003, 0x50054003, 0xa1467009,
+	0x0003b1c0, 0x4005238b, 0x835a1000, 0x855c84db, 0x1000a51f, 0x84de835d,
+	0xa52c855c, 0x50061000, 0x39cd3a4c, 0x3ad03a8f, 0x10004006, 0x70065007,
+	0xa00f2c12, 0x08034007, 0xaefc7205, 0xaefd700d, 0xa9641000, 0x40071c1a,
+	0x700daefc, 0x1000aefd, 0x70065007, 0x50101c16, 0x40075012, 0x700daefc,
+	0x2411aefd, 0xa8211000, 0x0803a00f, 0x500c7005, 0x1c1591e0, 0x500f5014,
+	0x10005011, 0x500c2bd4, 0x0803a00f, 0x10007205, 0xa00fa9d1, 0x0803a821,
+	0xa9d07005, 0x91e0500c, 0x500f1c15, 0x10005011, 0x1c162bce, 0x50125010,
+	0xa022a82a, 0x70050803, 0x1c1591df, 0x5011500f, 0x5014500c, 0x0803a00f,
+	0x10007205, 0x501391a4, 0x22172217, 0x70075008, 0xa9634008, 0x1c1a0006,
+	0x70085009, 0x10004009, 0x00008ed9, 0x3e05c8dd, 0x1c033604, 0xabaf1000,
+	0x856284e1, 0x0003bb80, 0x1000239f, 0x0803a037, 0x10007205, 0x8dc61000,
+	0x38a71c2a, 0x1c2a8dc4, 0x100038a6, 0x1c2a8dc5, 0x8dc73867, 0x38681c2a,
+	0x8c491000, 0x8d4b8cca, 0x10001c00, 0x8ccd8c4c, 0x1c008d4e, 0x8c4f1000,
+	0x8d518cd0, 0x10001c00, 0xa759a79a, 0x1000a718, 0xbf80af9b, 0x00001000,
+};
+
+/* OSM sequencer branch table (47 words) */
+static const u32 msm8998_osm_seq_br[] = {
+	0x00000248, 0x0000020e, 0x0000021c, 0x000000f6, 0x00000112, 0x0000011c,
+	0x000000e4, 0x000000ea, 0x000000c6, 0x000000d6, 0x00000126, 0x00000108,
+	0x00000184, 0x000001a8, 0x000001b0, 0x00000134, 0x00000158, 0x0000016e,
+	0x0000014a, 0x000000c2, 0x00000190, 0x000001d2, 0x000001cc, 0x000001d4,
+	0x000001e8, 0x00000000, 0x000001f6, 0x00000032, 0x00000066, 0x000000b0,
+	0x000000a6, 0x000001fc, 0x0000003c, 0x00000044, 0x0000005c, 0x00000060,
+	0x00000204, 0x00000030, 0x0000022a, 0x00000234, 0x0000023e, 0x00000000,
+	0x00000250, 0x00000000, 0x00000000, 0x0000009a, 0x0000020c,
+};
+
+static int msm8998_osm_upload_seq(u32 seq_addr, u32 off, const u32 *buf,
+				  size_t n)
+{
+	u32 base = seq_addr - OSM_SEQ_BASE_OFF;
+	size_t i;
+	int ret;
+
+	for (i = 0; i < n; i++) {
+		ret = qcom_scm_io_writel(base + off + i * 4, buf[i]);
+		if (ret)
+			return ret;
+	}
+
+	return 0;
+}
+
 static int qcom_cpufreq_hw_osm_seq_setup(struct platform_device *pdev,
 					 struct qcom_cpufreq_data *ddata,
 					 int index)
@@ -1453,6 +1524,19 @@ static int qcom_cpufreq_hw_osm_seq_setup(struct platform_device *pdev,
 		if (ret)						\
 			return ret;					\
 	} while (0)
+
+	/* Upload the sequencer program and its branch table first */
+	ret = msm8998_osm_upload_seq(seq_addr, OSM_SEQ_PROG_OFF,
+				     msm8998_osm_seq_prog,
+				     ARRAY_SIZE(msm8998_osm_seq_prog));
+	if (ret)
+		return ret;
+
+	ret = msm8998_osm_upload_seq(seq_addr, OSM_SEQ_BR_OFF,
+				     msm8998_osm_seq_br,
+				     ARRAY_SIZE(msm8998_osm_seq_br));
+	if (ret)
+		return ret;
 
 	/* Core count DCVS control */
 	writel(FIELD_PREP(GENMASK(23, 16), 0xf),
