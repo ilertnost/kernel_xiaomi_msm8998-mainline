@@ -304,3 +304,18 @@ config QCOM_UBWC_CONFIG
 	  (UBWC) engines across various IP blocks, which need to be initialized
 	  with coherent configuration data. This module functions as a single
 	  source of truth for that information.
+
+config QCOM_CPR3
+	tristate "QCOM Core Power Reduction (CPR v3/v4/Hardened) support"
+	depends on ARCH_QCOM && HAS_IOMEM
+	select PM_OPP
+	select REGMAP
+	help
+	  Say Y here to enable support for the CPR hardware found on a broad
+	  variety of Qualcomm SoCs like MSM8996, MSM8998, SDM630, SDM660,
+	  SDM845 and others.
+
+	  This driver populates OPP tables and makes adjustments to them
+	  based on feedback from the CPR hardware. If you want to do CPU
+	  and/or GPU frequency scaling say Y here.
+

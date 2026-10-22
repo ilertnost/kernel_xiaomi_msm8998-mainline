@@ -895,3 +895,7 @@
 &pm8005_s1 {
 	regulator-min-microvolt = <988000>;
 };
+
+&apc_cprh {
+	status = "okay";
+};
