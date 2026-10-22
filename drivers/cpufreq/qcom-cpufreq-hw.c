@@ -1674,7 +1674,7 @@ static int qcom_cpufreq_hw_osm_gfmux(int index, u32 sel, const char *what)
 #define PLL_LOCK_DET		BIT(16)
 #define PLL_SETUP_L_VAL		0x20	/* 32 * 19.2 MHz = 614.4 MHz */
 
-static int qcom_cpufreq_hw_osm_pll_init(int index)
+static int qcom_cpufreq_hw_osm_pll_program(int index, u32 l_val)
 {
 	const struct qcom_cpufreq_osm_addrs *addrs = &msm8998_osm_addrs[index];
 	void __iomem *base;
@@ -1693,7 +1693,7 @@ static int qcom_cpufreq_hw_osm_pll_init(int index)
 	cfg_lo = readl_relaxed(base + PLL_CONFIG_CTL_LO_REG);
 
 	writel_relaxed(0x0, base + PLL_MODE_REG);
-	writel_relaxed(PLL_SETUP_L_VAL, base + PLL_L_VAL_REG);
+	writel_relaxed(l_val, base + PLL_L_VAL_REG);
 	writel_relaxed(0x01000008, base + PLL_USER_CTRL_REG);
 	writel_relaxed(0x20004aa8, base + PLL_CONFIG_CTL_LO_REG);
 	writel_relaxed(0x2, base + PLL_MODE_REG);
@@ -1715,7 +1715,7 @@ static int qcom_cpufreq_hw_osm_pll_init(int index)
 	mode = readl_relaxed(base + PLL_MODE_REG);
 	status = readl_relaxed(base + PLL_STATUS_REG);
 
-	pr_info("qcom-cpufreq: osm%d pll init: l %#x -> %#x, user %#x -> %#x, cfgl %#x -> %#x, mode=%#x status=%#x (lock after %d us)\n",
+	pr_info("qcom-cpufreq: osm%d pll program: l %#x -> %#x, user %#x -> %#x, cfgl %#x -> %#x, mode=%#x status=%#x (lock after %d us)\n",
 		index, l, readl_relaxed(base + PLL_L_VAL_REG),
 		user, readl_relaxed(base + PLL_USER_CTRL_REG),
 		cfg_lo, readl_relaxed(base + PLL_CONFIG_CTL_LO_REG),
@@ -1723,6 +1723,32 @@ static int qcom_cpufreq_hw_osm_pll_init(int index)
 
 	iounmap(base);
 	return 0;
+}
+
+static int qcom_cpufreq_hw_osm_pll_init(int index)
+{
+	return qcom_cpufreq_hw_osm_pll_program(index, PLL_SETUP_L_VAL);
+}
+
+/*
+ * Change the PLL rate while the cluster is running: park the mux on GPLL0,
+ * reprogram the PLL, wait for the lock and switch back.  Mirrors what the
+ * OSM sequencer does in hardware.
+ */
+static int qcom_cpufreq_hw_osm_pll_set_l(int index, u32 l_val)
+{
+	int ret;
+
+	ret = qcom_cpufreq_hw_osm_gfmux(index, GFMUX_GPLL_SEL_VAL, "GPLL0");
+	if (ret)
+		return ret;
+
+	ret = qcom_cpufreq_hw_osm_pll_program(index, l_val);
+	if (ret)
+		return ret;
+
+	return qcom_cpufreq_hw_osm_gfmux(index, GFMUX_PLL_MAIN_VAL,
+					 "PLL main");
 }
 
 /**
@@ -1882,6 +1908,17 @@ static int qcom_cpufreq_hw_osm_setup(struct device *cpu_dev,
 	/* We're ready: enable the OSM and give it time to boot (5 uS) */
 	writel(1, drv_data->base + drv_data->soc_data->reg_enable);
 	udelay(OSM_BOOT_TIME_US);
+
+	/*
+	 * The OSM sequencer never comes alive on this platform, so nothing
+	 * ever moves the APCS general frequency mux off the always-on GPLL0
+	 * (the bootloader leaves the performance cluster there at ~300 MHz
+	 * while the power cluster already runs from its PLL).  Drive the mux
+	 * ourselves: the PLL was just programmed to 614.4 MHz above.
+	 */
+	if (index == 1)
+		qcom_cpufreq_hw_osm_gfmux(index, GFMUX_PLL_MAIN_VAL,
+					  "PLL main (boot)");
 
 	return 0;
 }
@@ -2558,6 +2595,12 @@ static ssize_t osm_test_store(struct device *dev,
 		return count;
 	case 'F':
 		qcom_cpufreq_hw_osm_gfmux(0, GFMUX_GPLL_SEL_VAL, "GPLL0");
+		return count;
+	case 'h':
+		qcom_cpufreq_hw_osm_pll_set_l(1, 0x28);	/* 2 * 40 * 19.2 MHz */
+		return count;
+	case 'H':
+		qcom_cpufreq_hw_osm_pll_set_l(1, 0x20);
 		return count;
 	case 's':
 		for (i = 0; i < qcom_cpufreq.num_domains; i++)
