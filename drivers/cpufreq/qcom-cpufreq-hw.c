@@ -1267,6 +1267,21 @@ static int qcom_cpufreq_hw_pll_init(struct platform_device *pdev,
 		return -ENOMEM;
 
 	/*
+	 * The bootloader leaves the SR2 PLL of the power cluster running and
+	 * selected, so never disable a PLL that is already up: taking the
+	 * clock away from a live cluster hangs the SoC.  Only initialise and
+	 * lock the PLL when it is off.
+	 */
+	if ((readl_relaxed(pll + PLL_MODE) & 0x7) == 0x7) {
+		dev_info(&pdev->dev,
+			 "PLL @%#x already enabled and locked (mode %#x, l %#x), leaving it alone\n",
+			 addrs->l_val_base - PLL_L_VAL,
+			 readl_relaxed(pll + PLL_MODE),
+			 readl_relaxed(pll + PLL_L_VAL));
+		return 0;
+	}
+
+	/*
 	 * Bring up and lock the SR2 PLL: this is what the secure world
 	 * normally does before it hands the OSM over to the OS.
 	 */
@@ -1801,6 +1816,63 @@ static struct platform_driver qcom_cpufreq_hw_driver = {
 	},
 };
 
+/* Dump the OSM/PLL/APCS/APM/ITM state, used for OSM bring-up debugging */
+static void qcom_cpufreq_dump_hw(int index)
+{
+	const struct qcom_cpufreq_osm_addrs *addrs = &msm8998_osm_addrs[index];
+	struct qcom_cpufreq_data *ddata = &qcom_cpufreq.data[index];
+	void __iomem *pll, *apcs, *apm, *itm;
+	int i;
+
+	pll = ioremap(addrs->l_val_base - PLL_L_VAL, 0x1000);
+	apcs = ioremap(addrs->apcs_cfg_rcgr & ~0xfff, 0x1000);
+	apm = ioremap(addrs->apm_mode_ctl & ~0xfff, 0x1000);
+	itm = ioremap(addrs->apcs_itm_present & ~0xfff, 0x1000);
+
+	if (pll)
+		pr_info("qcom-cpufreq: osm%d pll mode=%#x l=%#x user=%#x cfgl=%#x status=%#x\n",
+			index, readl_relaxed(pll + PLL_MODE),
+			readl_relaxed(pll + PLL_L_VAL),
+			readl_relaxed(pll + PLL_USER_CTRL),
+			readl_relaxed(pll + PLL_CONFIG_CTL_LO),
+			readl_relaxed(pll + 0x2c));
+	if (apcs)
+		pr_info("qcom-cpufreq: osm%d apcs cmd=%#x cfg=%#x\n", index,
+			readl_relaxed(apcs + (addrs->apcs_cmd_rcgr & 0xfff)),
+			readl_relaxed(apcs + (addrs->apcs_cfg_rcgr & 0xfff)));
+	if (apm)
+		pr_info("qcom-cpufreq: osm%d apm mode=%#x status=%#x\n", index,
+			readl_relaxed(apm + (addrs->apm_mode_ctl & 0xfff)),
+			readl_relaxed(apm + (addrs->apm_ctrl_status & 0xfff)));
+	if (itm)
+		pr_info("qcom-cpufreq: osm%d itm=%#x\n", index,
+			readl_relaxed(itm + (addrs->apcs_itm_present & 0xfff)));
+
+	if (!ddata->base)
+		goto out;
+
+	pr_info("qcom-cpufreq: osm%d perf_state=%#x current_vote=%#x\n", index,
+		readl_relaxed(ddata->base + 0xf10),
+		readl_relaxed(ddata->base + 0x704));
+
+	for (i = 0; i < 16; i++)
+		pr_info("qcom-cpufreq: osm%d seq_mem[%#x]=%#010x seq_br[%#x]=%#010x\n",
+			index, 0x500 + i * 4,
+			readl_relaxed(ddata->base + 0x500 + i * 4),
+			0x170 + i * 4,
+			readl_relaxed(ddata->base + 0x170 + i * 4));
+
+out:
+	if (pll)
+		iounmap(pll);
+	if (apcs)
+		iounmap(apcs);
+	if (apm)
+		iounmap(apm);
+	if (itm)
+		iounmap(itm);
+}
+
 static void qcom_cpufreq_dump_regs(int index)
 {
 	struct qcom_cpufreq_data *ddata = &qcom_cpufreq.data[index];
@@ -1912,6 +1984,10 @@ static ssize_t osm_test_store(struct device *dev,
 	case 'd':
 		for (i = 0; i < qcom_cpufreq.num_domains; i++)
 			qcom_cpufreq_dry_run(i, 0);
+		return count;
+	case 'p':
+		for (i = 0; i < qcom_cpufreq.num_domains; i++)
+			qcom_cpufreq_dump_hw(i);
 		return count;
 	}
 
