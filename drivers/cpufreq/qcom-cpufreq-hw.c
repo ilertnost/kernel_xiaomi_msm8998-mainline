@@ -294,6 +294,9 @@ struct qcom_cpufreq_data {
 
 	/* Set once the OSM has been programmed for this domain */
 	bool osm_ready;
+
+	/* msm8998: OSM votes have to go through the LLM override handshake */
+	bool llm_sw_override;
 };
 
 static struct {
@@ -363,6 +366,42 @@ static int qcom_cpufreq_update_opp(struct device *cpu_dev,
 	return dev_pm_opp_enable(cpu_dev, freq_hz);
 }
 
+/*
+ * msm8998: the OSM takes its vote from the LLM block, and the vendor driver
+ * pulses a software-override handshake around every perf-state write.  Without
+ * it the perf-state register happily keeps the requested index while the
+ * sequencer never leaves index 0, so the cluster stays on the GPLL0 fallback
+ * no matter what cpufreq asks for.
+ *
+ * The values are qcom,llm-sw-overr from the vendor msm8998 device tree:
+ * override, override+1, release.
+ */
+#define LLM_SW_OVERRIDE_REG	0x38
+static const u32 msm8998_llm_sw_overr[][3] = {
+	{ 0x8fff0036, 0x8fff003a, 0x0fff0036 },	/* pwrcl */
+	{ 0x8fff003d, 0x8fff0041, 0x0fff003d },	/* perfcl */
+};
+
+static void msm8998_osm_write_index(struct qcom_cpufreq_data *data,
+				    unsigned int index)
+{
+	int domain = data - qcom_cpufreq.data;
+	const u32 *ovr;
+
+	if (domain < 0 || domain >= ARRAY_SIZE(msm8998_llm_sw_overr))
+		return;
+
+	ovr = msm8998_llm_sw_overr[domain];
+	writel_relaxed(ovr[0], data->base + LLM_SW_OVERRIDE_REG);
+	writel_relaxed(ovr[1], data->base + LLM_SW_OVERRIDE_REG);
+	udelay(1);
+	writel_relaxed(index, data->base + qcom_cpufreq.soc_data->reg_perf_state);
+	udelay(1);
+	writel_relaxed(ovr[2], data->base + LLM_SW_OVERRIDE_REG);
+	/* Make sure the writes went through before returning */
+	readl_relaxed(data->base + qcom_cpufreq.soc_data->reg_enable);
+}
+
 static int qcom_cpufreq_hw_target_index(struct cpufreq_policy *policy,
 					unsigned int index)
 {
@@ -371,7 +410,10 @@ static int qcom_cpufreq_hw_target_index(struct cpufreq_policy *policy,
 	unsigned long freq = policy->freq_table[index].frequency;
 	unsigned int i;
 
-	writel_relaxed(index, data->base + soc_data->reg_perf_state);
+	if (data->llm_sw_override)
+		msm8998_osm_write_index(data, index);
+	else
+		writel_relaxed(index, data->base + soc_data->reg_perf_state);
 
 	if (data->per_core_dcvs)
 		for (i = 1; i < cpumask_weight(policy->related_cpus); i++)
@@ -443,7 +485,10 @@ static unsigned int qcom_cpufreq_hw_fast_switch(struct cpufreq_policy *policy,
 	unsigned int i;
 
 	index = policy->cached_resolved_idx;
-	writel_relaxed(index, data->base + soc_data->reg_perf_state);
+	if (data->llm_sw_override)
+		msm8998_osm_write_index(data, index);
+	else
+		writel_relaxed(index, data->base + soc_data->reg_perf_state);
 
 	if (data->per_core_dcvs)
 		for (i = 1; i < cpumask_weight(policy->related_cpus); i++)
@@ -1895,6 +1940,8 @@ static int qcom_cpufreq_hw_driver_probe(struct platform_device *pdev)
 
 		data->base = base;
 		data->soc_data = qcom_cpufreq.soc_data;
+		data->llm_sw_override =
+			qcom_cpufreq.soc_data == &msm8998_soc_data;
 
 		/* Register CPU clock for each frequency domain */
 		clk_init.name = kasprintf(GFP_KERNEL, "qcom_cpufreq%d", i);
