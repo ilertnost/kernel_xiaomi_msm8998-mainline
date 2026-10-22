@@ -1936,14 +1936,17 @@ static void qcom_cpufreq_hw_osm_park(void)
 	}
 }
 
-/* Probe how the OSM aperture can be accessed from the non-secure world */
-static void qcom_cpufreq_hw_osm_wtest(int index)
+/*
+ * Dump the raw OSM aperture.  Reads of the sequencer program memory and of
+ * the parameter window are safe; writes to it are what the security
+ * configuration forbids, so this is the way to find out what actually landed.
+ */
+static void qcom_cpufreq_hw_osm_page(int index)
 {
 	struct resource *osm_rsrc;
 	char osm_resname[] = "osm-domainX";
-	phys_addr_t base;
 	void __iomem *osm;
-	u32 v;
+	int i;
 
 	snprintf(osm_resname, sizeof(osm_resname), "osm-domain%d", index);
 	osm_rsrc = platform_get_resource_byname(qcom_cpufreq.pdev,
@@ -1951,31 +1954,22 @@ static void qcom_cpufreq_hw_osm_wtest(int index)
 	if (!osm_rsrc)
 		return;
 
-	base = osm_rsrc->start;
-	osm = ioremap(base, 0x1000);
+	osm = ioremap(osm_rsrc->start, 0x1000);
 	if (!osm)
 		return;
 
-	pr_info("osm%d: version direct=%#x scm=%#x\n", index,
-		readl_relaxed(osm), qcom_cpufreq_scm_read(base));
-	pr_info("osm%d: seq500 direct=%#x scm=%#x\n", index,
-		readl_relaxed(osm + 0x500),
-		qcom_cpufreq_scm_read(base + 0x500));
-	pr_info("osm%d: seq_br170 direct=%#x scm=%#x\n", index,
-		readl_relaxed(osm + 0x170),
-		qcom_cpufreq_scm_read(base + 0x170));
-
-	writel_relaxed(0xdeadbeef, osm + 0x520);
-	mb();
-	pr_info("osm%d: direct write 0x520 -> direct=%#x scm=%#x\n", index,
-		readl_relaxed(osm + 0x520),
-		qcom_cpufreq_scm_read(base + 0x520));
-
-	v = qcom_scm_io_writel(base + 0x524, 0xcafebabe);
-	mb();
-	pr_info("osm%d: scm write 0x524 (rc=%d) -> direct=%#x scm=%#x\n", index, v,
-		readl_relaxed(osm + 0x524),
-		qcom_cpufreq_scm_read(base + 0x524));
+	for (i = 0; i < 0x800; i += 0x40) {
+		pr_info("osm%d page %#05x: %08x %08x %08x %08x %08x %08x %08x %08x %08x %08x %08x %08x %08x %08x %08x %08x\n",
+			index, i,
+			readl_relaxed(osm + i + 0x00), readl_relaxed(osm + i + 0x04),
+			readl_relaxed(osm + i + 0x08), readl_relaxed(osm + i + 0x0c),
+			readl_relaxed(osm + i + 0x10), readl_relaxed(osm + i + 0x14),
+			readl_relaxed(osm + i + 0x18), readl_relaxed(osm + i + 0x1c),
+			readl_relaxed(osm + i + 0x20), readl_relaxed(osm + i + 0x24),
+			readl_relaxed(osm + i + 0x28), readl_relaxed(osm + i + 0x2c),
+			readl_relaxed(osm + i + 0x30), readl_relaxed(osm + i + 0x34),
+			readl_relaxed(osm + i + 0x38), readl_relaxed(osm + i + 0x3c));
+	}
 
 	iounmap(osm);
 }
@@ -2171,9 +2165,14 @@ static ssize_t osm_test_store(struct device *dev,
 	case 'q':
 		qcom_cpufreq_hw_osm_park();
 		return count;
-	case 'w':
+	case 'D':
 		for (i = 0; i < qcom_cpufreq.num_domains; i++)
-			qcom_cpufreq_hw_osm_wtest(i);
+			qcom_cpufreq_hw_osm_page(i);
+		return count;
+	case 's':
+		for (i = 0; i < qcom_cpufreq.num_domains; i++)
+			qcom_cpufreq_hw_osm_seq_setup(qcom_cpufreq.pdev,
+						      &qcom_cpufreq.data[i], i);
 		return count;
 	}
 
