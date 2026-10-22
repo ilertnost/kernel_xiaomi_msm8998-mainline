@@ -1410,6 +1410,20 @@ static int qcom_cpufreq_hw_driver_probe(struct platform_device *pdev)
 	if (!cpu_dev)
 		return -EPROBE_DEFER;
 
+	/*
+	 * The OSM lookup table is built from the voltages that the CPR driver
+	 * derives from the chip fuses, so the CPR-hardened power domain has to
+	 * be up before we register. Probe again once it is available.
+	 */
+	if (qcom_cpufreq.soc_data->setup_regs) {
+		struct device *pd;
+
+		pd = dev_pm_domain_attach_by_name(cpu_dev, "cprh");
+		if (IS_ERR(pd))
+			return dev_err_probe(dev, PTR_ERR(pd),
+					     "CPRh power domain is not ready\n");
+	}
+
 	ret = dev_pm_opp_of_find_icc_paths(cpu_dev, NULL);
 	if (ret)
 		return dev_err_probe(dev, ret, "Failed to find icc paths\n");
