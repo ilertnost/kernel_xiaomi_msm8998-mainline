@@ -1373,7 +1373,7 @@ static int qcom_cpufreq_hw_osm_seq_setup(struct platform_device *pdev,
 	struct resource *osm_rsrc;
 	char osm_resname[] = "osm-domainX";
 	u32 seq_addr;
-	int i, ret;
+	int i;
 
 	if (index >= ARRAY_SIZE(msm8998_osm_addrs))
 		return -EINVAL;
@@ -1440,14 +1440,14 @@ static int qcom_cpufreq_hw_osm_seq_setup(struct platform_device *pdev,
 	 * running from the PLL rate that the bootloader left behind.
 	 */
 	for (i = 0; i < ARRAY_SIZE(osm_seq_instr); i++) {
-		ret = qcom_scm_io_writel(seq_addr + SEQ_MEM_ADDR + i * 4,
+		ret = qcom_scm_io_writel(osm_rsrc->start + SEQ_MEM_ADDR + i * 4,
 					 osm_seq_instr[i]);
 		if (ret)
 			return ret;
 	}
 
 	for (i = 0; i < ARRAY_SIZE(osm_seq_br_instr); i++) {
-		ret = qcom_scm_io_writel(seq_addr + SEQ_CFG_BR_ADDR + i * 4,
+		ret = qcom_scm_io_writel(osm_rsrc->start + SEQ_CFG_BR_ADDR + i * 4,
 					 osm_seq_br_instr[i]);
 		if (ret)
 			return ret;
@@ -1894,10 +1894,19 @@ static void qcom_cpufreq_dump_hw(int index)
 {
 	const struct qcom_cpufreq_osm_addrs *addrs = &msm8998_osm_addrs[index];
 	struct qcom_cpufreq_data *ddata = &qcom_cpufreq.data[index];
-	void __iomem *pll, *apcs, *apm, *itm;
+	struct resource *osm_rsrc;
+	char osm_resname[] = "osm-domainX";
+	void __iomem *pll, *apcs, *apm, *itm, *osm;
 	int i;
 
 	pll = ioremap(addrs->l_val_base - PLL_L_VAL, 0x1000);
+	snprintf(osm_resname, sizeof(osm_resname), "osm-domain%d", index);
+	osm_rsrc = platform_get_resource_byname(qcom_cpufreq.pdev,
+						IORESOURCE_MEM, osm_resname);
+	if (osm_rsrc)
+		osm = ioremap(osm_rsrc->start, 0x1000);
+	else
+		osm = NULL;
 	apcs = ioremap(addrs->apcs_cfg_rcgr & ~0xfff, 0x1000);
 	apm = ioremap(addrs->apm_mode_ctl & ~0xfff, 0x1000);
 	itm = ioremap(addrs->apcs_itm_present & ~0xfff, 0x1000);
@@ -1924,18 +1933,24 @@ static void qcom_cpufreq_dump_hw(int index)
 	if (!ddata->base)
 		goto out;
 
-	pr_info("qcom-cpufreq: osm%d perf_state=%#x current_vote=%#x\n", index,
+	pr_info("qcom-cpufreq: osm%d perf_state=%#x index=%#x enable=%#x\n", index,
 		readl_relaxed(ddata->base + 0xf10),
-		readl_relaxed(ddata->base + 0x704));
+		readl_relaxed(ddata->base + 0x150),
+		readl_relaxed(ddata->base + 0x4));
 
-	for (i = 0; i < 16; i++)
+	if (!osm)
+		goto out;
+
+	for (i = 0; i < 12; i++)
 		pr_info("qcom-cpufreq: osm%d seq_mem[%#x]=%#010x seq_br[%#x]=%#010x\n",
 			index, 0x500 + i * 4,
-			readl_relaxed(ddata->base + 0x500 + i * 4),
+			readl_relaxed(osm + 0x500 + i * 4),
 			0x170 + i * 4,
-			readl_relaxed(ddata->base + 0x170 + i * 4));
+			readl_relaxed(osm + 0x170 + i * 4));
 
 out:
+	if (osm)
+		iounmap(osm);
 	if (pll)
 		iounmap(pll);
 	if (apcs)
