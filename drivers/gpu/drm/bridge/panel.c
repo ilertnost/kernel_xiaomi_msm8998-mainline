@@ -126,6 +126,7 @@ static void panel_bridge_atomic_pre_enable(struct drm_bridge *bridge,
 	if (old_crtc_state && old_crtc_state->self_refresh_active)
 		return;
 
+	DRM_INFO("DBG panel_bridge atomic_pre_enable\n");
 	drm_panel_prepare(panel_bridge->panel);
 }
 
@@ -145,6 +146,7 @@ static void panel_bridge_atomic_enable(struct drm_bridge *bridge,
 	if (old_crtc_state && old_crtc_state->self_refresh_active)
 		return;
 
+	DRM_INFO("DBG panel_bridge atomic_enable\n");
 	drm_panel_enable(panel_bridge->panel);
 }
 
@@ -164,6 +166,7 @@ static void panel_bridge_atomic_disable(struct drm_bridge *bridge,
 	if (new_crtc_state && new_crtc_state->self_refresh_active)
 		return;
 
+	DRM_INFO("DBG panel_bridge atomic_disable\n");
 	drm_panel_disable(panel_bridge->panel);
 }
 
@@ -183,6 +186,7 @@ static void panel_bridge_atomic_post_disable(struct drm_bridge *bridge,
 	if (new_crtc_state && new_crtc_state->self_refresh_active)
 		return;
 
+	DRM_INFO("DBG panel_bridge atomic_post_disable\n");
 	drm_panel_unprepare(panel_bridge->panel);
 }
 

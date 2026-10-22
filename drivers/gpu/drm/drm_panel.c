@@ -245,6 +245,10 @@ void drm_panel_enable(struct drm_panel *panel)
 	if (!panel)
 		return;
 
+	dev_info(panel->dev, "DBG panel_enable: enabled=%d bl=%px bl_power=%d\n",
+		 panel->enabled, panel->backlight,
+		 panel->backlight ? panel->backlight->props.power : -1);
+
 	if (panel->enabled) {
 		dev_warn(panel->dev, "Skipping enable of already enabled panel\n");
 		return;
@@ -304,6 +308,10 @@ void drm_panel_disable(struct drm_panel *panel)
 	 *   In this case the warning is harmless though ideally you should
 	 *   figure out how to reverse the order of the shutdown() callbacks.
 	 */
+	dev_info(panel->dev, "DBG panel_disable: enabled=%d bl=%px bl_power=%d\n",
+		 panel->enabled, panel->backlight,
+		 panel->backlight ? panel->backlight->props.power : -1);
+
 	if (!panel->enabled) {
 		dev_warn(panel->dev, "Skipping disable of already disabled panel\n");
 		return;
