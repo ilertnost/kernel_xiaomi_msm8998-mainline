@@ -1959,6 +1959,17 @@ static int qcom_cpufreq_hw_driver_probe(struct platform_device *pdev)
 	if (IS_ERR(clk))
 		return PTR_ERR(clk);
 
+	/*
+	 * The vendor driver programs this clock to its nominal 300 MHz and
+	 * explicitly enables it before touching the OSM: index 0 of the
+	 * lookup table is always sourced from it, and the OSM clock root in
+	 * APCS_COMMON is derived from it as well.
+	 */
+	if (qcom_cpufreq.soc_data->setup_regs) {
+		clk_set_rate(clk, 300000000);
+		clk_prepare_enable(clk);
+	}
+
 	cpu_hw_rate = clk_get_rate(clk) /
 		      (qcom_cpufreq.soc_data->clk_hw_div ?: CLK_HW_DIV);
 	clk_put(clk);
@@ -2264,6 +2275,29 @@ static void qcom_cpufreq_hw_osm_aux_dump(void)
 			pr_info("qcom-cpufreq: apm[%#x]=%#010x\n", i,
 				readl_relaxed(p + i));
 		iounmap(p);
+	}
+
+	/*
+	 * OSM watchdog state: WDOG_DOMAIN_PSTATE_STATUS at OSM_BASE + 0x1c00
+	 * and the sequencer WDOG_PROGRAM_COUNTER at OSM_BASE + 0x1c74.  If the
+	 * counter does not move between two reads the sequencer is not
+	 * executing at all.
+	 */
+	for (i = 0; i < 2; i++) {
+		u32 base = i ? 0x179c2000 : 0x179c0000;
+		u32 pc1, pc2, st;
+
+		p = ioremap(base + 0x1c00, 0x1000);
+		if (!p)
+			continue;
+		p += 0x1c00;
+		st = readl_relaxed(p);
+		pc1 = readl_relaxed(p + 0x74);
+		udelay(200);
+		pc2 = readl_relaxed(p + 0x74);
+		pr_info("qcom-cpufreq: osm%d wdog pstate=%#010x pc=%#010x/%#010x\n",
+			i, st, pc1, pc2);
+		iounmap(p - 0x1c00);
 	}
 
 	for (i = 0; i < 2; i++) {
