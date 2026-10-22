@@ -1373,7 +1373,7 @@ static int qcom_cpufreq_hw_osm_seq_setup(struct platform_device *pdev,
 	struct resource *osm_rsrc;
 	char osm_resname[] = "osm-domainX";
 	u32 seq_addr;
-	int i;
+	int i, ret;
 
 	if (index >= ARRAY_SIZE(msm8998_osm_addrs))
 		return -EINVAL;
