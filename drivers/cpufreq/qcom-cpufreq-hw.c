@@ -1225,6 +1225,16 @@ static int qcom_cpufreq_hw_write_lut(struct device *cpu_dev,
 				  (0x39 | apm_vc << 6));
 }
 
+static u32 qcom_cpufreq_scm_read(phys_addr_t addr)
+{
+	u32 val = 0;
+
+	if (qcom_scm_io_readl(addr, &val))
+		return 0xffffffff;
+
+	return val;
+}
+
 /*
  * Fixed APCS register addresses on MSM8998 that the OSM sequencer has to know
  * in order to reprogram the per-cluster CPU PLL, to steer the APCS general
@@ -1456,6 +1466,13 @@ static int qcom_cpufreq_hw_osm_seq_setup(struct platform_device *pdev,
 	dev_info(&pdev->dev, "osm%d: uploaded %zu sequencer words and %zu branches\n",
 		 index, ARRAY_SIZE(osm_seq_instr),
 		 ARRAY_SIZE(osm_seq_br_instr));
+	dev_info(&pdev->dev, "osm%d: readback seq %#x/%#x (wrote %#x/%#x), br %#x (wrote %#x)\n",
+		 index,
+		 qcom_cpufreq_scm_read(osm_rsrc->start + SEQ_MEM_ADDR),
+		 qcom_cpufreq_scm_read(osm_rsrc->start + SEQ_MEM_ADDR + 4),
+		 osm_seq_instr[0], osm_seq_instr[1],
+		 qcom_cpufreq_scm_read(osm_rsrc->start + SEQ_CFG_BR_ADDR),
+		 osm_seq_br_instr[0]);
 
 #undef SEQ_WRITE
 
@@ -1919,6 +1936,50 @@ static void qcom_cpufreq_hw_osm_park(void)
 	}
 }
 
+/* Probe how the OSM aperture can be accessed from the non-secure world */
+static void qcom_cpufreq_hw_osm_wtest(int index)
+{
+	struct resource *osm_rsrc;
+	char osm_resname[] = "osm-domainX";
+	phys_addr_t base;
+	void __iomem *osm;
+	u32 v;
+
+	snprintf(osm_resname, sizeof(osm_resname), "osm-domain%d", index);
+	osm_rsrc = platform_get_resource_byname(qcom_cpufreq.pdev,
+						IORESOURCE_MEM, osm_resname);
+	if (!osm_rsrc)
+		return;
+
+	base = osm_rsrc->start;
+	osm = ioremap(base, 0x1000);
+	if (!osm)
+		return;
+
+	pr_info("osm%d: version direct=%#x scm=%#x\n", index,
+		readl_relaxed(osm), qcom_cpufreq_scm_read(base));
+	pr_info("osm%d: seq500 direct=%#x scm=%#x\n", index,
+		readl_relaxed(osm + 0x500),
+		qcom_cpufreq_scm_read(base + 0x500));
+	pr_info("osm%d: seq_br170 direct=%#x scm=%#x\n", index,
+		readl_relaxed(osm + 0x170),
+		qcom_cpufreq_scm_read(base + 0x170));
+
+	writel_relaxed(0xdeadbeef, osm + 0x520);
+	mb();
+	pr_info("osm%d: direct write 0x520 -> direct=%#x scm=%#x\n", index,
+		readl_relaxed(osm + 0x520),
+		qcom_cpufreq_scm_read(base + 0x520));
+
+	v = qcom_scm_io_writel(base + 0x524, 0xcafebabe);
+	mb();
+	pr_info("osm%d: scm write 0x524 (rc=%d) -> direct=%#x scm=%#x\n", index, v,
+		readl_relaxed(osm + 0x524),
+		qcom_cpufreq_scm_read(base + 0x524));
+
+	iounmap(osm);
+}
+
 /* Dump the OSM/PLL/APCS/APM/ITM state, used for OSM bring-up debugging */
 static void qcom_cpufreq_dump_hw(int index)
 {
@@ -2109,6 +2170,10 @@ static ssize_t osm_test_store(struct device *dev,
 		return count;
 	case 'q':
 		qcom_cpufreq_hw_osm_park();
+		return count;
+	case 'w':
+		for (i = 0; i < qcom_cpufreq.num_domains; i++)
+			qcom_cpufreq_hw_osm_wtest(i);
 		return count;
 	}
 
