@@ -1666,6 +1666,15 @@ static int qcom_cpufreq_hw_osm_clk_init(void)
 				break;
 			udelay(1);
 		}
+
+		/* Direct writes to APCS_COMMON may be blocked; retry via SCM */
+		if ((readl_relaxed(base + off) & APCS_RCG_SRC_SEL_MASK) !=
+		    (val & APCS_RCG_SRC_SEL_MASK)) {
+			pr_info("qcom-cpufreq: osm clock: direct write dropped, trying SCM\n");
+			qcom_scm_io_writel(APCS_COMMON_LMH_CMD_RCGR,
+					   val | APCS_RCG_UPDATE);
+			udelay(10);
+		}
 	}
 
 	pr_info("qcom-cpufreq: osm clock rcgr %#x -> %#x\n", before,
@@ -2290,14 +2299,13 @@ static void qcom_cpufreq_hw_osm_aux_dump(void)
 		p = ioremap(base + 0x1c00, 0x1000);
 		if (!p)
 			continue;
-		p += 0x1c00;
 		st = readl_relaxed(p);
 		pc1 = readl_relaxed(p + 0x74);
 		udelay(200);
 		pc2 = readl_relaxed(p + 0x74);
 		pr_info("qcom-cpufreq: osm%d wdog pstate=%#010x pc=%#010x/%#010x\n",
 			i, st, pc1, pc2);
-		iounmap(p - 0x1c00);
+		iounmap(p);
 	}
 
 	for (i = 0; i < 2; i++) {
