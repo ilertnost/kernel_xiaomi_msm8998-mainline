@@ -1548,53 +1548,59 @@ static void qcom_cpufreq_hw_boost_setup(void __iomem *timer0_addr, u32 len)
  * APCS_COMMON_LMH_CMD_RCGR is the root clock of the OSM sequencer.  The
  * vendor driver programs it to 200 MHz (GPLL0 300 MHz through the /1.5
  * divider) before it touches the OSM, but mainline has no clock driver for
- * this register and the bootloader leaves it on XO - the sequencer would
- * tick at ~19 MHz and never finish a frequency transition.
+ * this register.
  *
- * The divider field already holds 2, which is the /1.5 encoding, so only the
- * parent has to be switched to GPLL0.
+ * It is a plain clk_rcg2: CFG lives at cmd_rcgr + 4, CMD (with the UPDATE
+ * bit) at cmd_rcgr.  Writing the divider into the CMD register, as an
+ * earlier version of this code did, is silently ignored; the sequencer then
+ * keeps whatever clock the bootloader left behind.
  */
 #define APCS_COMMON_LMH_CMD_RCGR	0x179d112c
+#define APCS_COMMON_LMH_CFG_RCGR	0x179d1130
 #define APCS_RCG_SRC_SEL_SHIFT		8
 #define APCS_RCG_SRC_SEL_MASK		(0x7 << APCS_RCG_SRC_SEL_SHIFT)
+#define APCS_RCG_DIV_MASK		GENMASK(4, 0)
+#define APCS_RCG_MODE_MASK		GENMASK(13, 12)
 #define APCS_RCG_PARENT_GPLL0		1
+#define APCS_RCG_DIV_1_5		2	/* 300 MHz * 2 / 3 = 200 MHz */
 #define APCS_RCG_UPDATE			BIT(0)
 
 static int qcom_cpufreq_hw_osm_clk_init(void)
 {
 	void __iomem *base;
-	u32 off = APCS_COMMON_LMH_CMD_RCGR & 0xfff;
-	u32 before, val;
+	u32 cfg, new, cmd;
 	int i;
 
 	base = ioremap(APCS_COMMON_LMH_CMD_RCGR & ~0xfff, 0x1000);
 	if (!base)
 		return -ENOMEM;
 
-	before = readl_relaxed(base + off);
-	val = before & ~APCS_RCG_SRC_SEL_MASK;
-	val |= APCS_RCG_PARENT_GPLL0 << APCS_RCG_SRC_SEL_SHIFT;
+	cfg = readl_relaxed(base + (APCS_COMMON_LMH_CFG_RCGR & 0xfff));
 
-	if (val != before) {
-		writel_relaxed(val | APCS_RCG_UPDATE, base + off);
-		for (i = 0; i < 200; i++) {
-			if (!(readl_relaxed(base + off) & APCS_RCG_UPDATE))
+	new = cfg & ~(APCS_RCG_SRC_SEL_MASK | APCS_RCG_DIV_MASK |
+		      APCS_RCG_MODE_MASK);
+	new |= APCS_RCG_PARENT_GPLL0 << APCS_RCG_SRC_SEL_SHIFT;
+	new |= APCS_RCG_DIV_1_5;
+
+	if (new != cfg) {
+		writel_relaxed(new, base + (APCS_COMMON_LMH_CFG_RCGR & 0xfff));
+
+		/* Commit the new configuration */
+		cmd = readl_relaxed(base + (APCS_COMMON_LMH_CMD_RCGR & 0xfff));
+		writel_relaxed(cmd | APCS_RCG_UPDATE,
+			       base + (APCS_COMMON_LMH_CMD_RCGR & 0xfff));
+		for (i = 0; i < 500; i++) {
+			if (!(readl_relaxed(base +
+					    (APCS_COMMON_LMH_CMD_RCGR & 0xfff)) &
+			      APCS_RCG_UPDATE))
 				break;
 			udelay(1);
 		}
-
-		/* Direct writes to APCS_COMMON may be blocked; retry via SCM */
-		if ((readl_relaxed(base + off) & APCS_RCG_SRC_SEL_MASK) !=
-		    (val & APCS_RCG_SRC_SEL_MASK)) {
-			pr_info("qcom-cpufreq: osm clock: direct write dropped, trying SCM\n");
-			qcom_scm_io_writel(APCS_COMMON_LMH_CMD_RCGR,
-					   val | APCS_RCG_UPDATE);
-			udelay(10);
-		}
 	}
 
-	pr_info("qcom-cpufreq: osm clock rcgr %#x -> %#x\n", before,
-		readl_relaxed(base + off));
+	pr_info("qcom-cpufreq: osm clock cfg %#x -> %#x (cmd %#x)\n",
+		cfg, readl_relaxed(base + (APCS_COMMON_LMH_CFG_RCGR & 0xfff)),
+		readl_relaxed(base + (APCS_COMMON_LMH_CMD_RCGR & 0xfff)));
 
 	iounmap(base);
 	return 0;
