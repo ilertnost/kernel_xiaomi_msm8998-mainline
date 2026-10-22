@@ -513,6 +513,17 @@ static int gdsc_init(struct gdsc *sc)
 
 	if (sc->flags & ALWAYS_ON)
 		sc->pd.flags |= GENPD_FLAG_ALWAYS_ON;
+
+	/*
+	 * HACK (sagit bring-up): on MSM8998 the bootloader leaves several
+	 * GDSCs powered on and the kernel relies on that (the clock
+	 * controller's sync_state has always been deferred, so they were
+	 * never power-cycled). Now that qcom-cpufreq-hw binds, that
+	 * sync_state runs and switches off domains that no one has claimed
+	 * yet, which wedges the boot. Keep the old behaviour.
+	 */
+	sc->pd.flags |= GENPD_FLAG_NO_SYNC_STATE;
+
 	if (!sc->pd.power_off)
 		sc->pd.power_off = gdsc_disable;
 	if (!sc->pd.power_on)
