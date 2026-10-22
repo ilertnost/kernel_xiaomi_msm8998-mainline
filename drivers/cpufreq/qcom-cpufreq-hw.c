@@ -236,15 +236,34 @@ struct qcom_cpufreq_data {
 	struct clk_hw cpu_clk;
 
 	bool per_core_dcvs;
+
+	/* Set once the OSM has been programmed for this domain */
+	bool osm_ready;
 };
 
 static struct {
 	struct qcom_cpufreq_data *data;
 	const struct qcom_cpufreq_soc_data *soc_data;
+	int num_domains;
 } qcom_cpufreq;
 
 static unsigned long cpu_hw_rate, xo_rate;
 static bool icc_scaling_enabled;
+
+/*
+ * Bring the OSM up during probe. Disabled by default: on MSM8998 the
+ * bootloader leaves the OSM unprogrammed, and a mistake there wedges the
+ * cluster long before the console is available. So the bring-up is
+ * normally requested from userspace via the osm_test attribute instead.
+ */
+static bool osm_autostart;
+module_param_named(osm_autostart, osm_autostart, bool, 0644);
+MODULE_PARM_DESC(osm_autostart, "Program and enable the OSM during probe");
+
+static ssize_t osm_test_store(struct device *dev,
+			      struct device_attribute *attr,
+			      const char *buf, size_t count);
+static DEVICE_ATTR_WO(osm_test);
 
 static int qcom_cpufreq_set_bw(struct cpufreq_policy *policy,
 			       unsigned long freq_khz)
@@ -404,6 +423,13 @@ static int qcom_cpufreq_hw_read_lut(struct device *cpu_dev,
 			dev_pm_opp_put(opp);
 			dev_pm_opp_disable(cpu_dev, rate);
 		}
+	} else if (ret == -EEXIST) {
+		/*
+		 * The OSM setup installed the table already (it needs the
+		 * CPR-adjusted voltages); keep it and just update the
+		 * voltages from the LUT below.
+		 */
+		icc_scaling_enabled = true;
 	} else if (ret != -ENODEV) {
 		dev_err(cpu_dev, "Invalid opp table in device tree\n");
 		kfree(table);
@@ -762,15 +788,44 @@ static int qcom_cpufreq_gen_params(struct device *cpu_dev,
 	unsigned long rate, millivolts;
 	int apm_uV, acc_uV, i, gpd_opp_cnt, ret = 0;
 
-	vdev = dev_pm_domain_attach_by_name(cpu_dev, "cprh");
-	if (IS_ERR(vdev))
-		return dev_err_probe(&pdev->dev, PTR_ERR(vdev),
-				     "Could not attach to CPRh power domain\n");
-
-	/* The CPR driver stores its thresholds in the CPU device drvdata */
+	/*
+	 * The CPR driver stores its thresholds and the computed corner
+	 * voltages in the CPU device drvdata, so it being set means we are
+	 * already attached to the CPRh power domain.
+	 */
 	cpr_data = dev_get_drvdata(cpu_dev);
+	if (!cpr_data) {
+		vdev = dev_pm_domain_attach_by_name(cpu_dev, "cprh");
+		if (IS_ERR(vdev))
+			return dev_err_probe(&pdev->dev, PTR_ERR(vdev),
+					     "Could not attach to CPRh power domain\n");
+		cpr_data = dev_get_drvdata(cpu_dev);
+	}
+
 	if (!cpr_data)
 		return -ENODATA;
+
+	/*
+	 * The OPP core needs the table to be empty while attaching the
+	 * required_dev in the power domain, so it has to be installed here,
+	 * after the attach. The CPR computed the per-chip voltages during
+	 * the attach and handed them over; apply them now.
+	 */
+	ret = dev_pm_opp_of_add_table(cpu_dev);
+	if (ret && ret != -EEXIST)
+		return dev_err_probe(&pdev->dev, ret,
+				     "Cannot add the CPU OPP table\n");
+
+	for (i = 0; i < cpr_data->num_corner_voltages; i++) {
+		struct cpr_corner_voltage *cv = &cpr_data->corner_voltages[i];
+
+		ret = dev_pm_opp_adjust_voltage(cpu_dev, cv->freq, cv->uV,
+						cv->min_uV, cv->max_uV);
+		if (ret)
+			return dev_err_probe(&pdev->dev, ret,
+					     "Cannot set %lu kHz to %d uV\n",
+					     cv->freq / 1000, cv->uV);
+	}
 
 	gpd_opp_cnt = dev_pm_opp_get_opp_count(cpu_dev);
 	if (gpd_opp_cnt < 2) {
@@ -913,10 +968,9 @@ static int qcom_cpufreq_hw_acd_write_xfer(struct qcom_cpufreq_data *data,
 }
 
 static int qcom_cpufreq_hw_acd_init(struct device *cpu_dev,
-				    struct cpufreq_policy *policy, int index)
+				    struct qcom_cpufreq_data *ddata, int index)
 {
 	struct platform_device *pdev = cpufreq_get_driver_data();
-	struct qcom_cpufreq_data *ddata = policy->driver_data;
 	const struct qcom_cpufreq_soc_acd_data *aregs = ddata->soc_data->acd_data;
 	char acd_resname[] = "osm-acdX";
 	void __iomem *acd_base;
@@ -984,11 +1038,10 @@ static int qcom_cpufreq_hw_acd_init(struct device *cpu_dev,
  * qcom_cpufreq_hw_write_lut() - Program the OSM lookup table
  */
 static int qcom_cpufreq_hw_write_lut(struct device *cpu_dev,
-				     struct cpufreq_policy *policy,
+				     struct qcom_cpufreq_data *ddata,
 				     int cpu_count, int index)
 {
 	struct platform_device *pdev = cpufreq_get_driver_data();
-	struct qcom_cpufreq_data *ddata = policy->driver_data;
 	const struct qcom_cpufreq_soc_data *sdata = ddata->soc_data;
 	const struct qcom_cpufreq_soc_setup_data *sregs = sdata->setup_regs;
 	struct qcom_cpufreq_hw_params *hw_tbl;
@@ -1144,16 +1197,15 @@ static void qcom_cpufreq_hw_boost_setup(void __iomem *timer0_addr, u32 len)
  * timers and, last but not least, the enable bit.
  */
 static int qcom_cpufreq_hw_osm_setup(struct device *cpu_dev,
-				     struct cpufreq_policy *policy,
+				     struct qcom_cpufreq_data *drv_data,
 				     int cpu_count, int index)
 {
-	struct qcom_cpufreq_data *drv_data = policy->driver_data;
 	const struct qcom_cpufreq_soc_setup_data *setup_regs =
 		drv_data->soc_data->setup_regs;
 	u32 val;
 	int ret;
 
-	ret = qcom_cpufreq_hw_write_lut(cpu_dev, policy, cpu_count, index);
+	ret = qcom_cpufreq_hw_write_lut(cpu_dev, drv_data, cpu_count, index);
 	if (ret)
 		return ret;
 
@@ -1233,7 +1285,7 @@ static int qcom_cpufreq_hw_osm_setup(struct device *cpu_dev,
 	       drv_data->base + setup_regs->reg_pll_override);
 
 	/* Initialize the Adaptive Clock Distribution */
-	ret = qcom_cpufreq_hw_acd_init(cpu_dev, policy, index);
+	ret = qcom_cpufreq_hw_acd_init(cpu_dev, drv_data, index);
 	if (ret)
 		return ret;
 
@@ -1280,14 +1332,15 @@ static int qcom_cpufreq_hw_cpu_init(struct cpufreq_policy *policy)
 	policy->dvfs_possible_from_any_cpu = true;
 	data->policy = policy;
 
-	if (!qcom_cpufreq.soc_data->uses_tz) {
-		ret = qcom_cpufreq_hw_osm_setup(cpu_dev, policy,
+	if (!qcom_cpufreq.soc_data->uses_tz && !data->osm_ready) {
+		ret = qcom_cpufreq_hw_osm_setup(cpu_dev, data,
 						cpumask_weight(policy->cpus), index);
 		if (ret) {
 			dev_err(dev, "Cannot setup the OSM for CPU%d: %d\n",
 				policy->cpu, ret);
 			return ret;
 		}
+		data->osm_ready = true;
 	}
 
 	/* HW should be in enabled state to proceed */
@@ -1413,9 +1466,10 @@ static int qcom_cpufreq_hw_driver_probe(struct platform_device *pdev)
 	/*
 	 * The OSM lookup table is built from the voltages that the CPR driver
 	 * derives from the chip fuses, so the CPR-hardened power domain has to
-	 * be up before we register. Probe again once it is available.
+	 * be up before we program the OSM. Only wait for it when autostart is
+	 * enabled: otherwise the bring-up is triggered from userspace.
 	 */
-	if (qcom_cpufreq.soc_data->setup_regs) {
+	if (osm_autostart && qcom_cpufreq.soc_data->setup_regs) {
 		struct device *pd;
 
 		pd = dev_pm_domain_attach_by_name(cpu_dev, "cprh");
@@ -1486,10 +1540,30 @@ static int qcom_cpufreq_hw_driver_probe(struct platform_device *pdev)
 		kfree(clk_init.name);
 	}
 
+	qcom_cpufreq.num_domains = num_domains;
+
 	ret = devm_of_clk_add_hw_provider(dev, of_clk_hw_onecell_get, clk_data);
 	if (ret < 0) {
 		dev_err(dev, "Failed to add clock provider\n");
 		return ret;
+	}
+
+	if (qcom_cpufreq.soc_data->setup_regs) {
+		ret = device_create_file(dev, &dev_attr_osm_test);
+		if (ret) {
+			dev_err(dev, "Failed to create osm_test attribute\n");
+			return ret;
+		}
+	}
+
+	/*
+	 * Without a programmed OSM there are no OPPs to expose, so keep the
+	 * device bound (which also keeps the iomap alive) and let userspace
+	 * trigger the bring-up through the osm_test attribute.
+	 */
+	if (!osm_autostart && qcom_cpufreq.soc_data->setup_regs) {
+		dev_info(dev, "OSM autostart disabled, cpufreq stays unregistered\n");
+		return 0;
 	}
 
 	ret = cpufreq_register_driver(&cpufreq_qcom_hw_driver);
@@ -1503,6 +1577,9 @@ static int qcom_cpufreq_hw_driver_probe(struct platform_device *pdev)
 
 static void qcom_cpufreq_hw_driver_remove(struct platform_device *pdev)
 {
+	if (qcom_cpufreq.soc_data->setup_regs)
+		device_remove_file(&pdev->dev, &dev_attr_osm_test);
+
 	cpufreq_unregister_driver(&cpufreq_qcom_hw_driver);
 }
 
@@ -1515,11 +1592,180 @@ static struct platform_driver qcom_cpufreq_hw_driver = {
 	},
 };
 
+static void qcom_cpufreq_dump_regs(int index)
+{
+	struct qcom_cpufreq_data *ddata = &qcom_cpufreq.data[index];
+	const struct qcom_cpufreq_soc_data *sd = ddata->soc_data;
+	int i;
+
+	pr_info("qcom-cpufreq: osm%d enable=0x%x\n", index,
+		readl_relaxed(ddata->base + sd->reg_enable));
+
+	for (i = 0; i < LUT_MAX_ENTRIES; i++) {
+		int pos = i * sd->lut_row_size;
+		u32 idx;
+
+		if (sd->reg_freq_lut < 4)
+			break;
+
+		idx = readl_relaxed(ddata->base + sd->reg_freq_lut - 4 + pos);
+		pr_info("qcom-cpufreq: osm%d lut[%d] idx=0x%x freq=0x%08x volt=0x%08x\n",
+			index, i, idx,
+			readl_relaxed(ddata->base + sd->reg_freq_lut + pos),
+			readl_relaxed(ddata->base + sd->reg_volt_lut + pos));
+	}
+}
+
+/* Find the first CPU of a frequency domain and count its siblings */
+static int qcom_cpufreq_domain_cpu(int index, int *cpu_count)
+{
+	int cpu, first = -1, count = 0;
+
+	for_each_possible_cpu(cpu) {
+		struct of_phandle_args args;
+		struct device_node *np = of_cpu_device_node_get(cpu);
+
+		if (!np)
+			continue;
+
+		if (!of_parse_phandle_with_args(np, "qcom,freq-domain",
+						"#freq-domain-cells", 0, &args) &&
+		    args.args[0] == index) {
+			if (first < 0)
+				first = cpu;
+			count++;
+		}
+		of_node_put(np);
+	}
+
+	*cpu_count = count;
+	return first;
+}
+
+static void qcom_cpufreq_dry_run(int index, int cpu_count)
+{
+	struct qcom_cpufreq_data *ddata = &qcom_cpufreq.data[index];
+	struct qcom_cpufreq_hw_params *tbl = NULL;
+	int apm_vc = INT_MAX, acc_vc = U8_MAX;
+	u8 num_entries = 0;
+	int cpu, i, ret;
+	struct device *cpu_dev;
+
+	cpu = qcom_cpufreq_domain_cpu(index, &cpu_count);
+	if (cpu < 0) {
+		pr_err("qcom-cpufreq: domain %d has no CPU\n", index);
+		return;
+	}
+	cpu_dev = get_cpu_device(cpu);
+
+	ret = qcom_cpufreq_gen_params(cpu_dev, ddata, &tbl, &apm_vc, &acc_vc,
+				      cpu_count, &num_entries);
+	if (ret) {
+		pr_err("qcom-cpufreq: osm%d gen_params failed: %d\n", index, ret);
+		return;
+	}
+
+	pr_info("qcom-cpufreq: osm%d %u entries, apm_vc=%d acc_vc=%d\n",
+		index, num_entries, apm_vc, acc_vc);
+
+	for (i = 0; i < num_entries; i++)
+		pr_info("qcom-cpufreq: osm%d [%02d] freq=0x%08x volt=0x%08x ovr=0x%08x spare=0x%08x\n",
+			index, i, tbl[i].freq_lut_val, tbl[i].volt_lut_val,
+			tbl[i].override_val, tbl[i].spare_val);
+}
+
+/*
+ * osm_test - runtime MSM8998 OSM bring-up
+ *
+ * "d"        - compute and print the OSM table for both domains (no writes)
+ * "r"        - read back the OSM registers
+ * "0".."N-1" - attach to CPRh and program/enable the given domain
+ *
+ * Printing goes to the serial console, so the last line tells where things
+ * stopped if the cluster wedges.
+ */
+static ssize_t osm_test_store(struct device *dev,
+			      struct device_attribute *attr,
+			      const char *buf, size_t count)
+{
+	struct platform_device *pdev = to_platform_device(dev);
+	struct device *cpu_dev, *pd;
+	int index, cpu, cpu_count, ret, i;
+
+	if (!qcom_cpufreq.soc_data->setup_regs)
+		return -EOPNOTSUPP;
+
+	switch (buf[0]) {
+	case 'r':
+		for (i = 0; i < qcom_cpufreq.num_domains; i++)
+			qcom_cpufreq_dump_regs(i);
+		return count;
+	case 'd':
+		for (i = 0; i < qcom_cpufreq.num_domains; i++)
+			qcom_cpufreq_dry_run(i, 0);
+		return count;
+	}
+
+	if (buf[0] < '0' || buf[0] > '9')
+		return -EINVAL;
+
+	index = buf[0] - '0';
+	if (index >= qcom_cpufreq.num_domains)
+		return -EINVAL;
+
+	cpu = qcom_cpufreq_domain_cpu(index, &cpu_count);
+	if (cpu < 0)
+		return -ENODEV;
+
+	cpu_dev = get_cpu_device(cpu);
+	if (!cpu_dev)
+		return -ENODEV;
+
+	pr_info("qcom-cpufreq: osm%d bring-up: cpu%d, %d cpus\n",
+		index, cpu, cpu_count);
+
+	if (!dev_get_drvdata(cpu_dev)) {
+		pr_info("qcom-cpufreq: osm%d: attaching to CPRh\n", index);
+		pd = dev_pm_domain_attach_by_name(cpu_dev, "cprh");
+		if (IS_ERR(pd)) {
+			pr_err("qcom-cpufreq: osm%d: CPRh attach failed: %ld\n",
+			       index, PTR_ERR(pd));
+			return PTR_ERR(pd);
+		}
+		pr_info("qcom-cpufreq: osm%d: attached\n", index);
+	}
+
+	pr_info("qcom-cpufreq: osm%d: programming the OSM\n", index);
+
+	ret = qcom_cpufreq_hw_osm_setup(cpu_dev, &qcom_cpufreq.data[index],
+					cpu_count, index);
+	pr_info("qcom-cpufreq: osm%d: setup returned %d\n", index, ret);
+	if (ret)
+		return ret;
+
+	qcom_cpufreq.data[index].osm_ready = true;
+	qcom_cpufreq_dump_regs(index);
+
+	for (i = 0; i < qcom_cpufreq.num_domains; i++)
+		if (!qcom_cpufreq.data[i].osm_ready)
+			return count;
+
+	pr_info("qcom-cpufreq: all domains ready, registering cpufreq\n");
+	ret = cpufreq_register_driver(&cpufreq_qcom_hw_driver);
+	if (ret) {
+		dev_err(&pdev->dev, "CPUFreq HW driver failed to register: %d\n",
+			ret);
+		return ret;
+	}
+
+	pr_info("qcom-cpufreq: cpufreq registered\n");
+	return count;
+}
+
 static int __init qcom_cpufreq_hw_init(void)
 {
 	return platform_driver_register(&qcom_cpufreq_hw_driver);
-}
-postcore_initcall(qcom_cpufreq_hw_init);
+}postcore_initcall(qcom_cpufreq_hw_init);
 
 static void __exit qcom_cpufreq_hw_exit(void)
 {

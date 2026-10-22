@@ -1241,41 +1241,47 @@ static void cpr3_restrict_corner(struct corner *corner, int threshold,
 }
 
 /*
- * cprh_corner_adjust_opps() - Set voltage on each CPU OPP table entry
+ * cprh_export_corner_voltages() - Publish the per-corner voltages
  *
  * On CPR-Hardened, the voltage level is controlled internally through
  * the OSM hardware: in order to initialize the latter, we have to
  * communicate the voltage to its driver, so that it will be able to
  * write the right parameters (as they have to be set both on the CPRh
  * and on the OSM) on it.
+ *
+ * The consumer cannot apply these to the CPU OPP table while attaching:
+ * the OPP core refuses to pin the required_dev once OPPs are present, and
+ * this callback runs before the consumer installs its table. So the values
+ * are published in the ext_data and applied right after.
  * This function is called only for CPRh.
  *
  * Return: Zero for success, negative number for error.
  */
-static int cprh_corner_adjust_opps(struct cpr_thread *thread)
+static int cprh_export_corner_voltages(struct cpr_thread *thread)
 {
-	struct corner *corner = thread->corners;
 	struct cpr_drv *drv = thread->drv;
-	int i, ret;
+	int i;
 
-	for (i = 0; i < thread->num_corners; i++) {
-		ret = dev_pm_opp_adjust_voltage(thread->attached_cpu_dev,
-						corner[i].freq,
-						corner[i].uV,
-						corner[i].min_uV,
-						corner[i].max_uV);
-		if (ret)
-			break;
-
-		dev_dbg(drv->dev, "OPP voltage adjusted for %lu kHz, %d uV\n",
-			corner[i].freq, corner[i].uV);
+	if (thread->num_corners > CPR_MAX_CORNER_VOLTAGES) {
+		dev_err(drv->dev, "Too many corners: %u\n", thread->num_corners);
+		return -EINVAL;
 	}
 
-	/* If we couldn't adjust voltage for all corners, something went wrong */
-	if (i < thread->num_corners)
-		return -EINVAL;
+	for (i = 0; i < thread->num_corners; i++) {
+		struct cpr_corner_voltage *cv = &thread->ext_data.corner_voltages[i];
+		struct corner *corner = &thread->corners[i];
 
-	return ret;
+		cv->freq = corner->freq;
+		cv->uV = corner->uV;
+		cv->min_uV = corner->min_uV;
+		cv->max_uV = corner->max_uV;
+
+		dev_dbg(drv->dev, "corner %d: %lu kHz %d uV\n", i,
+			corner->freq / 1000, corner->uV);
+	}
+
+	thread->ext_data.num_corner_voltages = thread->num_corners;
+	return 0;
 }
 
 /**
@@ -1534,10 +1540,10 @@ static int cpr3_corner_init(struct cpr_thread *thread)
 	if (desc->cpr_type < CTRL_TYPE_CPRH)
 		return 0;
 
-	/* If the OPPs can't be adjusted, programming the CPRh is useless */
-	ret = cprh_corner_adjust_opps(thread);
+	/* If the voltages cannot be exported, programming the CPRh is useless */
+	ret = cprh_export_corner_voltages(thread);
 	if (ret) {
-		dev_err(drv->dev, "Cannot adjust CPU OPP voltages: %d\n", ret);
+		dev_err(drv->dev, "Cannot export corner voltages: %d\n", ret);
 		return ret;
 	}
 
@@ -2333,7 +2339,6 @@ static int cpr_pd_attach_dev(struct generic_pm_domain *domain,
 	struct cpr_thread *thread = container_of(domain, struct cpr_thread, pd);
 	struct cpr_drv *drv = thread->drv;
 	const struct acc_desc *acc_desc = drv->acc_desc;
-	bool cprh_opp_remove_table = false;
 	int ret = 0;
 
 	mutex_lock(&drv->lock);
@@ -2423,20 +2428,6 @@ static int cpr_pd_attach_dev(struct generic_pm_domain *domain,
 		goto unlock;
 	}
 
-	/*
-	 * If we are on CPR-Hardened we have to make sure that the attached
-	 * device has a OPP table installed, as we're going to modify it here
-	 * with our calculations based on qfprom values.
-	 */
-	if (drv->desc->cpr_type == CTRL_TYPE_CPRH) {
-		ret = dev_pm_opp_of_add_table(dev);
-		if (ret && ret != -EEXIST) {
-			dev_err(drv->dev, "Cannot add table: %d\n", ret);
-			goto unlock;
-		}
-		cprh_opp_remove_table = true;
-	}
-
 	ret = cpr3_corner_init(thread);
 	if (ret)
 		goto exit;
@@ -2459,13 +2450,6 @@ static int cpr_pd_attach_dev(struct generic_pm_domain *domain,
 	dev_info(drv->dev, "thread %d initialized with %u OPPs\n",
 		 thread->id, thread->num_corners);
 exit:
-	/*
-	 * If we are on CPRh and we reached an error condition, we installed
-	 * the OPP table but we haven't done any setup on it, nor we ever will.
-	 * In order to leave a clean state, remove the table.
-	 */
-	if (ret && cprh_opp_remove_table)
-		dev_pm_opp_of_remove_table(thread->attached_cpu_dev);
 unlock:
 	mutex_unlock(&drv->lock);
 
