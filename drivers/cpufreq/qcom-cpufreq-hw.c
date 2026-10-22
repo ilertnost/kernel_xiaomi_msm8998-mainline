@@ -244,6 +244,7 @@ struct qcom_cpufreq_data {
 static struct {
 	struct qcom_cpufreq_data *data;
 	const struct qcom_cpufreq_soc_data *soc_data;
+	struct platform_device *pdev;
 	int num_domains;
 } qcom_cpufreq;
 
@@ -679,7 +680,7 @@ MODULE_DEVICE_TABLE(of, qcom_cpufreq_hw_match);
 static int qcom_cpufreq_hw_lmh_init(struct cpufreq_policy *policy, int index)
 {
 	struct qcom_cpufreq_data *data = policy->driver_data;
-	struct platform_device *pdev = cpufreq_get_driver_data();
+	struct platform_device *pdev = qcom_cpufreq.pdev;
 	int ret;
 
 	/*
@@ -716,7 +717,7 @@ static int qcom_cpufreq_hw_lmh_init(struct cpufreq_policy *policy, int index)
 static int qcom_cpufreq_hw_cpu_online(struct cpufreq_policy *policy)
 {
 	struct qcom_cpufreq_data *data = policy->driver_data;
-	struct platform_device *pdev = cpufreq_get_driver_data();
+	struct platform_device *pdev = qcom_cpufreq.pdev;
 	int ret;
 
 	if (data->throttle_irq <= 0)
@@ -780,7 +781,7 @@ static int qcom_cpufreq_gen_params(struct device *cpu_dev,
 				   int *apm_vc, int *acc_vc, int cpu_count,
 				   u8 *num_entries)
 {
-	struct platform_device *pdev = cpufreq_get_driver_data();
+	struct platform_device *pdev = qcom_cpufreq.pdev;
 	const struct qcom_cpufreq_soc_data *soc_data = data->soc_data;
 	struct cpr_ext_data *cpr_data;
 	struct dev_pm_opp *genpd_opp;
@@ -970,7 +971,7 @@ static int qcom_cpufreq_hw_acd_write_xfer(struct qcom_cpufreq_data *data,
 static int qcom_cpufreq_hw_acd_init(struct device *cpu_dev,
 				    struct qcom_cpufreq_data *ddata, int index)
 {
-	struct platform_device *pdev = cpufreq_get_driver_data();
+	struct platform_device *pdev = qcom_cpufreq.pdev;
 	const struct qcom_cpufreq_soc_acd_data *aregs = ddata->soc_data->acd_data;
 	char acd_resname[] = "osm-acdX";
 	void __iomem *acd_base;
@@ -1041,7 +1042,7 @@ static int qcom_cpufreq_hw_write_lut(struct device *cpu_dev,
 				     struct qcom_cpufreq_data *ddata,
 				     int cpu_count, int index)
 {
-	struct platform_device *pdev = cpufreq_get_driver_data();
+	struct platform_device *pdev = qcom_cpufreq.pdev;
 	const struct qcom_cpufreq_soc_data *sdata = ddata->soc_data;
 	const struct qcom_cpufreq_soc_setup_data *sregs = sdata->setup_regs;
 	struct qcom_cpufreq_hw_params *hw_tbl;
@@ -1298,7 +1299,7 @@ static int qcom_cpufreq_hw_osm_setup(struct device *cpu_dev,
 
 static int qcom_cpufreq_hw_cpu_init(struct cpufreq_policy *policy)
 {
-	struct platform_device *pdev = cpufreq_get_driver_data();
+	struct platform_device *pdev = qcom_cpufreq.pdev;
 	struct device *dev = &pdev->dev;
 	struct of_phandle_args args;
 	struct device_node *cpu_np;
@@ -1441,6 +1442,8 @@ static int qcom_cpufreq_hw_driver_probe(struct platform_device *pdev)
 	if (!qcom_cpufreq.soc_data)
 		return -ENODEV;
 
+	qcom_cpufreq.pdev = pdev;
+
 	clk = clk_get(dev, "xo");
 	if (IS_ERR(clk))
 		return PTR_ERR(clk);
@@ -1455,8 +1458,6 @@ static int qcom_cpufreq_hw_driver_probe(struct platform_device *pdev)
 	cpu_hw_rate = clk_get_rate(clk) /
 		      (qcom_cpufreq.soc_data->clk_hw_div ?: CLK_HW_DIV);
 	clk_put(clk);
-
-	cpufreq_qcom_hw_driver.driver_data = pdev;
 
 	/* Check for optional interconnect paths on CPU0 */
 	cpu_dev = get_cpu_device(0);
