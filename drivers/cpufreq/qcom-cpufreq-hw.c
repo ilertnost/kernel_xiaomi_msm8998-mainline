@@ -1606,6 +1606,125 @@ static int qcom_cpufreq_hw_osm_clk_init(void)
 	return 0;
 }
 
+/*
+ * Manual APCS general frequency mux control.  The OSM sequencer performs
+ * exactly these writes from firmware (slots 16/17/33/34/83): select the
+ * always-on GPLL0, reprogram the CPU PLL, then switch the mux over to the
+ * PLL output and poll the command register for the completion value.
+ *
+ * The OSM must be parked before the mux is moved by hand, otherwise the
+ * sequencer and this code fight over the same register.
+ */
+#define GFMUX_GPLL_SEL_VAL	0x400
+#define GFMUX_PLL_MAIN_VAL	0x300
+#define GFMUX_UPDATE_VAL	0x3
+#define GFMUX_SUCCESS_VAL	0x2
+
+static int qcom_cpufreq_hw_osm_gfmux(int index, u32 sel, const char *what)
+{
+	const struct qcom_cpufreq_osm_addrs *addrs = &msm8998_osm_addrs[index];
+	void __iomem *base;
+	u32 cfg, cmd, cfg_after, cmd_after;
+	int i;
+
+	if (index >= qcom_cpufreq.num_domains)
+		return -EINVAL;
+
+	base = ioremap(addrs->apcs_cmd_rcgr & ~0xfff, 0x1000);
+	if (!base)
+		return -ENOMEM;
+
+	cfg = readl_relaxed(base + (addrs->apcs_cfg_rcgr & 0xfff));
+	cmd = readl_relaxed(base + (addrs->apcs_cmd_rcgr & 0xfff));
+
+	writel_relaxed(sel, base + (addrs->apcs_cfg_rcgr & 0xfff));
+	writel_relaxed(GFMUX_UPDATE_VAL,
+		       base + (addrs->apcs_cmd_rcgr & 0xfff));
+
+	for (i = 0; i < 1000; i++) {
+		cmd_after = readl_relaxed(base +
+					  (addrs->apcs_cmd_rcgr & 0xfff));
+		if (cmd_after == GFMUX_SUCCESS_VAL)
+			break;
+		udelay(1);
+	}
+
+	cfg_after = readl_relaxed(base + (addrs->apcs_cfg_rcgr & 0xfff));
+	cmd_after = readl_relaxed(base + (addrs->apcs_cmd_rcgr & 0xfff));
+
+	pr_info("qcom-cpufreq: osm%d gfmux -> %s: cfg %#x -> %#x, cmd %#x -> %#x after %d us\n",
+		index, what, cfg, cfg_after, cmd, cmd_after, i);
+
+	iounmap(base);
+	return 0;
+}
+
+/*
+ * Bring the per-cluster CPU PLL up exactly the way the vendor clock driver
+ * does it in clk_osm_setup_cluster_pll(): standby, program L/user/config,
+ * enable, wait for lock, then release the post divider.  Without this the
+ * PLL can stay in standby, and the sequencer's switch to the PLL output then
+ * has nothing to lock onto.
+ */
+#define PLL_MODE_REG		0x0
+#define PLL_L_VAL_REG		0x4
+#define PLL_USER_CTRL_REG	0xc
+#define PLL_CONFIG_CTL_LO_REG	0x10
+#define PLL_STATUS_REG		0x2c
+#define PLL_LOCK_DET		BIT(16)
+#define PLL_SETUP_L_VAL		0x20	/* 32 * 19.2 MHz = 614.4 MHz */
+
+static int qcom_cpufreq_hw_osm_pll_init(int index)
+{
+	const struct qcom_cpufreq_osm_addrs *addrs = &msm8998_osm_addrs[index];
+	void __iomem *base;
+	u32 l, user, cfg_lo, mode, status;
+	int i;
+
+	if (index >= qcom_cpufreq.num_domains)
+		return -EINVAL;
+
+	base = ioremap(addrs->l_val_base & ~0xfff, 0x1000);
+	if (!base)
+		return -ENOMEM;
+
+	l = readl_relaxed(base + PLL_L_VAL_REG);
+	user = readl_relaxed(base + PLL_USER_CTRL_REG);
+	cfg_lo = readl_relaxed(base + PLL_CONFIG_CTL_LO_REG);
+
+	writel_relaxed(0x0, base + PLL_MODE_REG);
+	writel_relaxed(PLL_SETUP_L_VAL, base + PLL_L_VAL_REG);
+	writel_relaxed(0x01000008, base + PLL_USER_CTRL_REG);
+	writel_relaxed(0x20004aa8, base + PLL_CONFIG_CTL_LO_REG);
+	writel_relaxed(0x2, base + PLL_MODE_REG);
+	mb();
+	udelay(10);
+	writel_relaxed(0x6, base + PLL_MODE_REG);
+	mb();
+	usleep_range(50, 75);
+	writel_relaxed(0x7, base + PLL_MODE_REG);
+	mb();
+
+	for (i = 0; i < 1000; i++) {
+		status = readl_relaxed(base + PLL_STATUS_REG);
+		if (status & PLL_LOCK_DET)
+			break;
+		udelay(1);
+	}
+
+	mode = readl_relaxed(base + PLL_MODE_REG);
+	status = readl_relaxed(base + PLL_STATUS_REG);
+
+	pr_info("qcom-cpufreq: osm%d pll init: l %#x -> %#x, user %#x -> %#x, cfgl %#x -> %#x, mode=%#x status=%#x (lock after %d us)\n",
+		index, l, readl_relaxed(base + PLL_L_VAL_REG),
+		user, readl_relaxed(base + PLL_USER_CTRL_REG),
+		cfg_lo, readl_relaxed(base + PLL_CONFIG_CTL_LO_REG),
+		mode, status, i);
+
+	iounmap(base);
+	return 0;
+}
+
 /**
  * qcom_cpufreq_hw_osm_setup() - Setup and enable the OSM
  *
@@ -1663,6 +1782,10 @@ static int qcom_cpufreq_hw_osm_setup(struct device *cpu_dev,
 	}
 
 	ret = qcom_cpufreq_hw_write_lut(cpu_dev, drv_data, cpu_count, index);
+	if (ret)
+		return ret;
+
+	ret = qcom_cpufreq_hw_osm_pll_init(index);
 	if (ret)
 		return ret;
 
@@ -2423,6 +2546,18 @@ static ssize_t osm_test_store(struct device *dev,
 		return count;
 	case 'c':
 		qcom_cpufreq_hw_osm_clk_init();
+		return count;
+	case 'g':
+		qcom_cpufreq_hw_osm_gfmux(1, GFMUX_PLL_MAIN_VAL, "PLL main");
+		return count;
+	case 'G':
+		qcom_cpufreq_hw_osm_gfmux(1, GFMUX_GPLL_SEL_VAL, "GPLL0");
+		return count;
+	case 'f':
+		qcom_cpufreq_hw_osm_gfmux(0, GFMUX_PLL_MAIN_VAL, "PLL main");
+		return count;
+	case 'F':
+		qcom_cpufreq_hw_osm_gfmux(0, GFMUX_GPLL_SEL_VAL, "GPLL0");
 		return count;
 	case 's':
 		for (i = 0; i < qcom_cpufreq.num_domains; i++)
