@@ -114,6 +114,10 @@
 #define SEQ_RCG_UPDATE_SUCCESS		84
 #define SEQ_RCG_UPDATE_DONE		85
 
+/* Sequencer microcode and branch table windows inside the OSM block */
+#define SEQ_MEM_ADDR			0x500
+#define SEQ_CFG_BR_ADDR			0x170
+
 #define PLL_MIN_LVAL_VAL		43
 #define PLL_POST_DIV1_VAL		0x1f
 #define PLL_POST_DIV2_VAL		0x11f
@@ -1257,6 +1261,52 @@ static const struct qcom_cpufreq_osm_addrs msm8998_osm_addrs[] = {
 	},
 };
 
+/*
+ * OSM sequencer microcode.  The machine only knows how to switch a cluster
+ * between two clock sources and how to program a PLL through the register
+ * addresses programmed into its parameter window; the program itself and
+ * its branch table have to be uploaded by the OS, because neither the
+ * bootloader nor the secure world initialise the OSM on this SoC.
+ */
+static const u32 osm_seq_instr[] = {
+	0xc2005000, 0x2c9e3b21, 0xc0ab2cdc, 0xc2882525, 0x359dc491, 0x700a500b,
+	0x5001aefc, 0xaefd7000, 0x390938c8, 0xcb44c833, 0xce56cd54, 0x341336e0,
+	0xa4baadba, 0xb480a493, 0x10004000, 0x70005001, 0x1000500c, 0xc792c5a1,
+	0x501625e1, 0x3da335a2, 0x50170006, 0x50150006, 0x1000c633, 0x1000acb3,
+	0xc422acb4, 0xaefc1000, 0x700a500b, 0x70005001, 0x5010aefd, 0x5012700b,
+	0xad41700c, 0x84e5adb9, 0xb3808566, 0x239b0003, 0x856484e3, 0xb9800007,
+	0x2bad0003, 0xac3aa20b, 0x0003181b, 0x0003bb40, 0xa30d239b, 0x500c181b,
+	0x5011500f, 0x181b3413, 0x853984b9, 0x0003bd80, 0xa0012ba4, 0x72050803,
+	0x500e1000, 0x500c1000, 0x1c011c0a, 0x3b181c06, 0x1c073b43, 0x1c061000,
+	0x1c073983, 0x1c02500c, 0x10001c0a, 0x70015002, 0x81031000, 0x70025003,
+	0x70035004, 0x3b441000, 0x81553985, 0x70025003, 0x50054003, 0xa1467009,
+	0x0003b1c0, 0x4005238b, 0x835a1000, 0x855c84db, 0x1000a51f, 0x84de835d,
+	0xa52c855c, 0x50061000, 0x39cd3a4c, 0x3ad03a8f, 0x10004006, 0x70065007,
+	0xa00f2c12, 0x08034007, 0xaefc7205, 0xaefd700d, 0xa9641000, 0x40071c1a,
+	0x700daefc, 0x1000aefd, 0x70065007, 0x50101c16, 0x40075012, 0x700daefc,
+	0x2411aefd, 0xa8211000, 0x0803a00f, 0x500c7005, 0x1c1591e0, 0x500f5014,
+	0x10005011, 0x500c2bd4, 0x0803a00f, 0x10007205, 0xa00fa9d1, 0x0803a821,
+	0xa9d07005, 0x91e0500c, 0x500f1c15, 0x10005011, 0x1c162bce, 0x50125010,
+	0xa022a82a, 0x70050803, 0x1c1591df, 0x5011500f, 0x5014500c, 0x0803a00f,
+	0x10007205, 0x501391a4, 0x22172217, 0x70075008, 0xa9634008, 0x1c1a0006,
+	0x70085009, 0x10004009, 0x00008ed9, 0x3e05c8dd, 0x1c033604, 0xabaf1000,
+	0x856284e1, 0x0003bb80, 0x1000239f, 0x0803a037, 0x10007205, 0x8dc61000,
+	0x38a71c2a, 0x1c2a8dc4, 0x100038a6, 0x1c2a8dc5, 0x8dc73867, 0x38681c2a,
+	0x8c491000, 0x8d4b8cca, 0x10001c00, 0x8ccd8c4c, 0x1c008d4e, 0x8c4f1000,
+	0x8d518cd0, 0x10001c00, 0xa759a79a, 0x1000a718, 0xbf80af9b, 0x00001000,
+};
+
+static const u32 osm_seq_br_instr[] = {
+	0x248, 0x20e, 0x21c, 0xf6, 0x112, 0x11c,
+	0xe4, 0xea, 0xc6, 0xd6, 0x126, 0x108,
+	0x184, 0x1a8, 0x1b0, 0x134, 0x158, 0x16e,
+	0x14a, 0xc2, 0x190, 0x1d2, 0x1cc, 0x1d4,
+	0x1e8, 0x0, 0x1f6, 0x32, 0x66, 0xb0,
+	0xa6, 0x1fc, 0x3c, 0x44, 0x5c, 0x60,
+	0x204, 0x30, 0x22a, 0x234, 0x23e, 0x0,
+	0x250, 0x0, 0x0, 0x9a, 0x20c,
+};
+
 static int qcom_cpufreq_hw_pll_init(struct platform_device *pdev,
 				    const struct qcom_cpufreq_osm_addrs *addrs)
 {
@@ -1323,7 +1373,7 @@ static int qcom_cpufreq_hw_osm_seq_setup(struct platform_device *pdev,
 	struct resource *osm_rsrc;
 	char osm_resname[] = "osm-domainX";
 	u32 seq_addr;
-	int ret;
+	int i, ret;
 
 	if (index >= ARRAY_SIZE(msm8998_osm_addrs))
 		return -EINVAL;
@@ -1383,6 +1433,29 @@ static int qcom_cpufreq_hw_osm_seq_setup(struct platform_device *pdev,
 	SEQ_WRITE(SEQ_ITM_ZERO, 0);
 	SEQ_WRITE(SEQ_ITM_VALUE, index ? ITM_CL0_ENABLED_CL1_DISABLE :
 					ITM_CL0_DISABLE_CL1_ENABLED);
+
+	/*
+	 * Sequencer program and branch table.  Without them the OSM accepts
+	 * performance states but has no code to execute, so the cluster keeps
+	 * running from the PLL rate that the bootloader left behind.
+	 */
+	for (i = 0; i < ARRAY_SIZE(osm_seq_instr); i++) {
+		ret = qcom_scm_io_writel(seq_addr + SEQ_MEM_ADDR + i * 4,
+					 osm_seq_instr[i]);
+		if (ret)
+			return ret;
+	}
+
+	for (i = 0; i < ARRAY_SIZE(osm_seq_br_instr); i++) {
+		ret = qcom_scm_io_writel(seq_addr + SEQ_CFG_BR_ADDR + i * 4,
+					 osm_seq_br_instr[i]);
+		if (ret)
+			return ret;
+	}
+
+	dev_info(&pdev->dev, "osm%d: uploaded %zu sequencer words and %zu branches\n",
+		 index, ARRAY_SIZE(osm_seq_instr),
+		 ARRAY_SIZE(osm_seq_br_instr));
 
 #undef SEQ_WRITE
 
