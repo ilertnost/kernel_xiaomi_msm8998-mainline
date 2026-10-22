@@ -313,6 +313,7 @@ static bool icc_scaling_enabled;
  * normally requested from userspace via the osm_test attribute instead.
  */
 static bool osm_autostart;
+static bool osm_minimal;
 module_param_named(osm_autostart, osm_autostart, bool, 0644);
 MODULE_PARM_DESC(osm_autostart, "Program and enable the OSM during probe");
 
@@ -1519,9 +1520,15 @@ static int qcom_cpufreq_hw_osm_setup(struct device *cpu_dev,
 	if (ret)
 		return ret;
 
-	ret = qcom_cpufreq_hw_osm_seq_setup(qcom_cpufreq.pdev, drv_data, index);
-	if (ret)
-		return ret;
+	if (!osm_minimal) {
+		ret = qcom_cpufreq_hw_osm_seq_setup(qcom_cpufreq.pdev, drv_data,
+						    index);
+		if (ret)
+			return ret;
+	} else {
+		dev_info(cpu_dev, "osm%d: minimal bring-up, sequencer setup skipped\n",
+			 index);
+	}
 
 	/* Set OSM to XO clock ratio and use the XO edge for the counter */
 	val = FIELD_PREP(CYCLE_COUNTER_CLK_RATIO, OSM_XO_RATIO_VAL);
@@ -2173,6 +2180,10 @@ static ssize_t osm_test_store(struct device *dev,
 		for (i = 0; i < qcom_cpufreq.num_domains; i++)
 			qcom_cpufreq_hw_osm_seq_setup(qcom_cpufreq.pdev,
 						      &qcom_cpufreq.data[i], i);
+		return count;
+	case 't':
+		osm_minimal = true;
+		pr_info("qcom-cpufreq: minimal OSM bring-up selected (no sequencer setup)\n");
 		return count;
 	}
 
