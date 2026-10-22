@@ -3898,6 +3898,21 @@
 			assigned-clocks = <&gcc HMSS_GPLL0_CLK_SRC>;
 			assigned-clock-rates = <300000000>;
 
+			/*
+			 * Absolute register addresses that the OSM sequencer has
+			 * to know about: the per-cluster CPU PLL (L value and user
+			 * control), the APCS general frequency mux and the array
+			 * power mux controller.
+			 */
+			qcom,l-val-base = <0x17916004 0x17816004>;
+			qcom,apcs-pll-user-ctl = <0x1791600c 0x1781600c>;
+			qcom,apcs-cfg-rcgr = <0x17911054 0x17811054>;
+			qcom,apcs-cmd-rcgr = <0x17911050 0x17811050>;
+			qcom,apm-mode-ctl = <0x179d0004 0x179d0010>;
+			qcom,apm-ctrl-status = <0x179d000c 0x179d0018>;
+			qcom,apcs-itm-present = <0x179d143c 0x179d143c>;
+			qcom,osm-pll-setup;
+
 			#freq-domain-cells = <1>;
 			#clock-cells = <1>;
 		};

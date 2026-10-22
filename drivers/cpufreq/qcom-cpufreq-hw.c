@@ -86,6 +86,55 @@
 #define SEQ_MEM_ACC_MAX_LEVELS		4
 #define SEQ_MEMACC_REG(base, n)		SEQUENCER_REG(base, SEQ_MEM_ACC_0 + n)
 
+/*
+ * Sequencer program slots used to hand the CPU PLL, the APCS general
+ * frequency mux and the array power mux over to the OSM.
+ */
+#define SEQ_PLL_L_VAL_ADDR		0
+#define SEQ_APM_MODE_CTL_ADDR		2
+#define SEQ_APM_CTRL_STATUS_ADDR	3
+#define SEQ_APCS_CFG_RCGR_ADDR		16
+#define SEQ_GPLL_SEL			17
+#define SEQ_PLL_USER_CTL_ADDR		18
+#define SEQ_PLL_POST_DIV2		19
+#define SEQ_PLL_MIN_LVAL		21
+#define SEQ_PLL_POST_DIV1		29
+#define SEQ_APCS_CMD_RCGR_ADDR		33
+#define SEQ_RCG_UPDATE			34
+#define SEQ_ITM_PRESENT_ADDR		37
+#define SEQ_ITM_ZERO			38
+#define SEQ_ITM_VALUE			39
+#define SEQ_APM_MX_MODE			77
+#define SEQ_APM_MX_MODE_VAL		78
+#define SEQ_APM_MODE_SWITCH_MASK	79
+#define SEQ_APM_APC_MODE		80
+#define SEQ_APM_APC_MODE_VAL		81
+#define SEQ_PLL_EARLY_SEL		82
+#define SEQ_PLL_MAIN_SEL		83
+#define SEQ_RCG_UPDATE_SUCCESS		84
+#define SEQ_RCG_UPDATE_DONE		85
+
+#define PLL_MIN_LVAL_VAL		43
+#define PLL_POST_DIV1_VAL		0x1f
+#define PLL_POST_DIV2_VAL		0x11f
+#define GPLL_SEL_VAL			0x400
+#define PLL_EARLY_SEL_VAL		0x500
+#define PLL_MAIN_SEL_VAL		0x300
+#define RCG_UPDATE_VAL			0x3
+#define RCG_UPDATE_SUCCESS_VAL		0x2
+#define APM_MODE_SWITCH_MASK_VAL	0x1f
+#define APM_MX_MODE_VAL			0x0
+#define APM_APC_MODE_VAL		0x2
+#define APM_APC_MODE_STATUS_VAL		0x3
+#define ITM_CL0_DISABLE_CL1_ENABLED	0x2
+#define ITM_CL0_ENABLED_CL1_DISABLE	0x1
+
+/* CPU PLL (SR2) register offsets */
+#define PLL_MODE			0x0
+#define PLL_L_VAL			0x4
+#define PLL_USER_CTRL			0xc
+#define PLL_CONFIG_CTL_LO		0x10
+
 #define ACD_WRITE_CTL_UPDATE_EN		BIT(0)
 #define ACD_WRITE_CTL_SELECT_SHIFT	1
 
@@ -100,6 +149,7 @@ struct qcom_cpufreq_soc_setup_data {
 	u16 reg_cc_zero_behav;
 	u16 reg_spm_cc_hyst;
 	u16 reg_spm_cc_dcvs_dis;
+	u16 reg_spm_cc_ctrl;
 	u16 reg_spm_core_ret_map;
 	u16 reg_llm_freq_vote_hyst;
 	u16 reg_llm_volt_vote_hyst;
@@ -159,6 +209,7 @@ static const struct qcom_cpufreq_soc_setup_data msm8998_setup_regs = {
 	.reg_cc_zero_behav = 0x0c,
 	.reg_spm_cc_hyst = 0x1c,
 	.reg_spm_cc_dcvs_dis = 0x20,
+	.reg_spm_cc_ctrl = 0x28,
 	.reg_spm_core_ret_map = 0x24,
 	.reg_llm_freq_vote_hyst = 0x2c,
 	.reg_llm_volt_vote_hyst = 0x30,
@@ -1170,6 +1221,146 @@ static int qcom_cpufreq_hw_write_lut(struct device *cpu_dev,
 				  (0x39 | apm_vc << 6));
 }
 
+static int qcom_cpufreq_hw_pll_init(struct platform_device *pdev, int index)
+{
+	struct device_node *np = pdev->dev.of_node;
+	void __iomem *pll;
+	u32 l_val_base;
+	int ret;
+
+	ret = of_property_read_u32_index(np, "qcom,l-val-base", index,
+					 &l_val_base);
+	if (ret) {
+		dev_err(&pdev->dev, "No qcom,l-val-base for domain %d\n", index);
+		return ret;
+	}
+
+	pll = devm_ioremap(&pdev->dev, l_val_base - PLL_L_VAL, 0x1000);
+	if (!pll)
+		return -ENOMEM;
+
+	/*
+	 * Bring up and lock the SR2 PLL: this is what the secure world
+	 * normally does before it hands the OSM over to the OS.
+	 */
+	writel_relaxed(0x0, pll + PLL_MODE);
+	writel_relaxed(0x20, pll + PLL_L_VAL);
+	writel_relaxed(0x01000008, pll + PLL_USER_CTRL);
+	writel_relaxed(0x20004aa8, pll + PLL_CONFIG_CTL_LO);
+	writel_relaxed(0x2, pll + PLL_MODE);
+
+	/* Ensure the writes complete before waiting for the lock */
+	mb();
+	udelay(10);
+
+	writel_relaxed(0x6, pll + PLL_MODE);
+	mb();
+	usleep_range(50, 75);
+	writel_relaxed(0x7, pll + PLL_MODE);
+
+	return 0;
+}
+
+/**
+ * qcom_cpufreq_hw_osm_seq_setup() - Teach the OSM sequencer about the clocks
+ *
+ * The OSM itself only knows about frequency indices: it is the sequencer
+ * microcode that has to reprogram the CPU PLL and to move the APCS general
+ * frequency mux between the alternate (GPLL0) and PLL inputs, as well as
+ * steering the array power mux. All of that is described by absolute
+ * register addresses that have to be programmed through SCM before the
+ * OSM is enabled, otherwise a performance state request is accepted but
+ * never reaches the PLL and the cluster keeps running at the boot rate.
+ */
+static int qcom_cpufreq_hw_osm_seq_setup(struct platform_device *pdev,
+					 struct qcom_cpufreq_data *ddata,
+					 int index)
+{
+	static const char * const props[] = {
+		"qcom,l-val-base",
+		"qcom,apcs-pll-user-ctl",
+		"qcom,apcs-cfg-rcgr",
+		"qcom,apcs-cmd-rcgr",
+		"qcom,apm-mode-ctl",
+		"qcom,apm-ctrl-status",
+		"qcom,apcs-itm-present",
+	};
+	const struct qcom_cpufreq_soc_setup_data *sregs;
+	struct device_node *np = pdev->dev.of_node;
+	struct resource *osm_rsrc;
+	char osm_resname[] = "osm-domainX";
+	u32 seq_addr, val[ARRAY_SIZE(props)];
+	int i, ret;
+
+	sregs = ddata->soc_data->setup_regs;
+
+	for (i = 0; i < ARRAY_SIZE(props); i++) {
+		ret = of_property_read_u32_index(np, props[i], index, &val[i]);
+		if (ret) {
+			dev_err(&pdev->dev, "No %s for domain %d\n",
+				props[i], index);
+			return ret;
+		}
+	}
+
+	snprintf(osm_resname, sizeof(osm_resname), "osm-domain%d", index);
+
+	osm_rsrc = platform_get_resource_byname(pdev, IORESOURCE_MEM,
+						osm_resname);
+	if (!osm_rsrc)
+		return -ENODEV;
+
+	seq_addr = osm_rsrc->start + sregs->reg_osm_sequencer;
+
+#define SEQ_WRITE(slot, value)						\
+	do {								\
+		ret = qcom_scm_io_writel(SEQUENCER_REG(seq_addr, (slot)),\
+					 (value));			\
+		if (ret)						\
+			return ret;					\
+	} while (0)
+
+	/* Core count DCVS control */
+	writel(FIELD_PREP(GENMASK(23, 16), 0xf),
+	       ddata->base + sregs->reg_spm_cc_ctrl);
+
+	/* CPU PLL: L value and user control register addresses */
+	SEQ_WRITE(SEQ_PLL_L_VAL_ADDR, val[0]);
+	SEQ_WRITE(SEQ_PLL_MIN_LVAL, PLL_MIN_LVAL_VAL);
+	SEQ_WRITE(SEQ_PLL_USER_CTL_ADDR, val[1]);
+	SEQ_WRITE(SEQ_PLL_POST_DIV2, PLL_POST_DIV2_VAL);
+	SEQ_WRITE(SEQ_PLL_POST_DIV1, PLL_POST_DIV1_VAL);
+
+	/* Array power mux controller */
+	SEQ_WRITE(SEQ_APM_MODE_CTL_ADDR, val[4]);
+	SEQ_WRITE(SEQ_APM_CTRL_STATUS_ADDR, val[5]);
+	SEQ_WRITE(SEQ_APM_MX_MODE, APM_MX_MODE_VAL);
+	SEQ_WRITE(SEQ_APM_MX_MODE_VAL, APM_MX_MODE_VAL);
+	SEQ_WRITE(SEQ_APM_MODE_SWITCH_MASK, APM_MODE_SWITCH_MASK_VAL);
+	SEQ_WRITE(SEQ_APM_APC_MODE, APM_APC_MODE_VAL);
+	SEQ_WRITE(SEQ_APM_APC_MODE_VAL, APM_APC_MODE_STATUS_VAL);
+
+	/* APCS general frequency mux */
+	SEQ_WRITE(SEQ_APCS_CFG_RCGR_ADDR, val[2]);
+	SEQ_WRITE(SEQ_APCS_CMD_RCGR_ADDR, val[3]);
+	SEQ_WRITE(SEQ_RCG_UPDATE, RCG_UPDATE_VAL);
+	SEQ_WRITE(SEQ_GPLL_SEL, GPLL_SEL_VAL);
+	SEQ_WRITE(SEQ_PLL_EARLY_SEL, PLL_EARLY_SEL_VAL);
+	SEQ_WRITE(SEQ_PLL_MAIN_SEL, PLL_MAIN_SEL_VAL);
+	SEQ_WRITE(SEQ_RCG_UPDATE_SUCCESS, RCG_UPDATE_SUCCESS_VAL);
+	SEQ_WRITE(SEQ_RCG_UPDATE_DONE, RCG_UPDATE_VAL);
+
+	/* ITM to OSM handoff */
+	SEQ_WRITE(SEQ_ITM_PRESENT_ADDR, val[6]);
+	SEQ_WRITE(SEQ_ITM_ZERO, 0);
+	SEQ_WRITE(SEQ_ITM_VALUE, index ? ITM_CL0_ENABLED_CL1_DISABLE :
+					ITM_CL0_DISABLE_CL1_ENABLED);
+
+#undef SEQ_WRITE
+
+	return qcom_cpufreq_hw_pll_init(pdev, index);
+}
+
 static void qcom_cpufreq_hw_boost_setup(void __iomem *timer0_addr, u32 len)
 {
 	u32 val;
@@ -1207,6 +1398,10 @@ static int qcom_cpufreq_hw_osm_setup(struct device *cpu_dev,
 	int ret;
 
 	ret = qcom_cpufreq_hw_write_lut(cpu_dev, drv_data, cpu_count, index);
+	if (ret)
+		return ret;
+
+	ret = qcom_cpufreq_hw_osm_seq_setup(qcom_cpufreq.pdev, drv_data, index);
 	if (ret)
 		return ret;
 
