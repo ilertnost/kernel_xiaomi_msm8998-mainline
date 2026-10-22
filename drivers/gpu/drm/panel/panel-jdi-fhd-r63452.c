@@ -200,6 +200,9 @@ static int jdi_fhd_r63452_probe(struct mipi_dsi_device *dsi)
 	if (ret)
 		return dev_err_probe(dev, ret, "Failed to get backlight\n");
 
+	dev_info(dev, "DBG probe: of_node=%pOF backlight=%px\n",
+		 dev->of_node, ctx->panel.backlight);
+
 	drm_panel_add(&ctx->panel);
 
 	ret = mipi_dsi_attach(dsi);
