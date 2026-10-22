@@ -1499,6 +1499,53 @@ static void qcom_cpufreq_hw_boost_setup(void __iomem *timer0_addr, u32 len)
 	writel(val, timer0_addr + (2 * len));
 }
 
+/*
+ * APCS_COMMON_LMH_CMD_RCGR is the root clock of the OSM sequencer.  The
+ * vendor driver programs it to 200 MHz (GPLL0 300 MHz through the /1.5
+ * divider) before it touches the OSM, but mainline has no clock driver for
+ * this register and the bootloader leaves it on XO - the sequencer would
+ * tick at ~19 MHz and never finish a frequency transition.
+ *
+ * The divider field already holds 2, which is the /1.5 encoding, so only the
+ * parent has to be switched to GPLL0.
+ */
+#define APCS_COMMON_LMH_CMD_RCGR	0x179d112c
+#define APCS_RCG_SRC_SEL_SHIFT		8
+#define APCS_RCG_SRC_SEL_MASK		(0x7 << APCS_RCG_SRC_SEL_SHIFT)
+#define APCS_RCG_PARENT_GPLL0		1
+#define APCS_RCG_UPDATE			BIT(0)
+
+static int qcom_cpufreq_hw_osm_clk_init(void)
+{
+	void __iomem *base;
+	u32 off = APCS_COMMON_LMH_CMD_RCGR & 0xfff;
+	u32 before, val;
+	int i;
+
+	base = ioremap(APCS_COMMON_LMH_CMD_RCGR & ~0xfff, 0x1000);
+	if (!base)
+		return -ENOMEM;
+
+	before = readl_relaxed(base + off);
+	val = before & ~APCS_RCG_SRC_SEL_MASK;
+	val |= APCS_RCG_PARENT_GPLL0 << APCS_RCG_SRC_SEL_SHIFT;
+
+	if (val != before) {
+		writel_relaxed(val | APCS_RCG_UPDATE, base + off);
+		for (i = 0; i < 200; i++) {
+			if (!(readl_relaxed(base + off) & APCS_RCG_UPDATE))
+				break;
+			udelay(1);
+		}
+	}
+
+	pr_info("qcom-cpufreq: osm clock rcgr %#x -> %#x\n", before,
+		readl_relaxed(base + off));
+
+	iounmap(base);
+	return 0;
+}
+
 /**
  * qcom_cpufreq_hw_osm_setup() - Setup and enable the OSM
  *
@@ -1513,8 +1560,16 @@ static int qcom_cpufreq_hw_osm_setup(struct device *cpu_dev,
 {
 	const struct qcom_cpufreq_soc_setup_data *setup_regs =
 		drv_data->soc_data->setup_regs;
+	static bool osm_clk_ready;
 	u32 val;
 	int ret;
+
+	if (!osm_clk_ready) {
+		ret = qcom_cpufreq_hw_osm_clk_init();
+		if (ret)
+			return ret;
+		osm_clk_ready = true;
+	}
 
 	ret = qcom_cpufreq_hw_write_lut(cpu_dev, drv_data, cpu_count, index);
 	if (ret)
@@ -2219,6 +2274,9 @@ static ssize_t osm_test_store(struct device *dev,
 		return count;
 	case 'k':
 		qcom_cpufreq_hw_osm_aux_dump();
+		return count;
+	case 'c':
+		qcom_cpufreq_hw_osm_clk_init();
 		return count;
 	case 's':
 		for (i = 0; i < qcom_cpufreq.num_domains; i++)
