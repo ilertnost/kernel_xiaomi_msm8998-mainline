@@ -1673,7 +1673,7 @@ static int qcom_cpufreq_hw_osm_gfmux(int index, u32 sel, const char *what)
 #define PLL_STATUS_REG		0x2c
 #define PLL_LOCK_DET		BIT(16)
 #define PLL_SETUP_L_VAL		0x20	/* 32 * 19.2 MHz = 614.4 MHz */
-#define PLL_BOOT_L_VAL		0x28	/* 1536 MHz, validated on sagit */
+#define PLL_BOOT_L_VAL		0x3c	/* 2304 MHz, validated on sagit */
 
 static int qcom_cpufreq_hw_osm_pll_program(int index, u32 l_val)
 {
