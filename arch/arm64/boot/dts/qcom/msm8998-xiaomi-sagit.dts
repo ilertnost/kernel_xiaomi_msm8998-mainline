@@ -877,10 +877,14 @@
 	};
 
 	opp-table {
+		/*
+		 * VDD_GFX is pm8005_s1, which is kept always-on at 988 mV, so
+		 * the Adreno 540 can run at its nominal corners.  Only the two
+		 * highest corners (670/710 MHz) stay disabled: they want the
+		 * GPU CPR, which mainline does not have.
+		 */
 		/delete-node/ opp-710000097;
 		/delete-node/ opp-670000048;
-		/delete-node/ opp-596000097;
-		/delete-node/ opp-515000097;
 	};
 };
 
