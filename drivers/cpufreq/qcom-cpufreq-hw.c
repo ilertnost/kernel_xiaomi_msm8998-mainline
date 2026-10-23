@@ -1641,7 +1641,7 @@ static int qcom_cpufreq_hw_osm_gfmux(int index, u32 sel, const char *what)
 	writel_relaxed(GFMUX_UPDATE_VAL,
 		       base + (addrs->apcs_cmd_rcgr & 0xfff));
 
-	for (i = 0; i < 1000; i++) {
+	for (i = 0; i < 20000; i++) {
 		cmd_after = readl_relaxed(base +
 					  (addrs->apcs_cmd_rcgr & 0xfff));
 		if (cmd_after == GFMUX_SUCCESS_VAL)
@@ -1692,10 +1692,14 @@ static int qcom_cpufreq_hw_osm_pll_program(int index, u32 l_val)
 	user = readl_relaxed(base + PLL_USER_CTRL_REG);
 	cfg_lo = readl_relaxed(base + PLL_CONFIG_CTL_LO_REG);
 
+	/*
+	 * Only L_VAL is touched.  USER_CTRL and CONFIG_CTL_LO are left exactly
+	 * as the bootloader programmed them: overwriting them with the vendor
+	 * driver's values gates the PLL output, and the APCS general frequency
+	 * mux then refuses to switch to it (the update bit never clears).
+	 */
 	writel_relaxed(0x0, base + PLL_MODE_REG);
 	writel_relaxed(l_val, base + PLL_L_VAL_REG);
-	writel_relaxed(0x01000008, base + PLL_USER_CTRL_REG);
-	writel_relaxed(0x20004aa8, base + PLL_CONFIG_CTL_LO_REG);
 	writel_relaxed(0x2, base + PLL_MODE_REG);
 	mb();
 	udelay(10);
