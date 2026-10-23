@@ -1746,7 +1746,14 @@ static struct msm_gpu *a5xx_gpu_init(struct drm_device *dev)
 
 	nr_rings = 4;
 
-	if (config->info->revn == 510)
+	/*
+	 * Preemption on a540 (msm8998) triggers SMMU faults on the preempt
+	 * record buffers when KWin submits from several queues at startup,
+	 * which then wedges the ring and forces a (sometimes hanging) GPU
+	 * recovery. Keep a single ring until the preempt record mapping is
+	 * sorted out.
+	 */
+	if (config->info->revn == 510 || config->info->revn == 540)
 		nr_rings = 1;
 
 	ret = adreno_gpu_init(dev, pdev, adreno_gpu, config->info->funcs, nr_rings);
