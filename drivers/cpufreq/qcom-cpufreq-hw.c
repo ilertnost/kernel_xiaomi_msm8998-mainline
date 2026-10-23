@@ -315,7 +315,7 @@ static bool icc_scaling_enabled;
  * cluster long before the console is available. So the bring-up is
  * normally requested from userspace via the osm_test attribute instead.
  */
-static bool osm_autostart = true;
+static bool osm_autostart;
 static bool osm_minimal;
 module_param_named(osm_autostart, osm_autostart, bool, 0644);
 MODULE_PARM_DESC(osm_autostart, "Program and enable the OSM during probe");
@@ -1751,6 +1751,36 @@ static int qcom_cpufreq_hw_osm_pll_set_l(int index, u32 l_val)
 					 "PLL main");
 }
 
+/*
+ * Move the cluster over to its CPU PLL, but only if the bootloader really
+ * left a locked PLL behind.  No PLL register is written here: the clock the
+ * cluster is executing from is switched, so a half-programmed PLL would
+ * simply kill the system.
+ */
+static void qcom_cpufreq_hw_osm_pick_pll(int index)
+{
+	const struct qcom_cpufreq_osm_addrs *addrs = &msm8998_osm_addrs[index];
+	void __iomem *base;
+	u32 l, status;
+
+	base = ioremap(addrs->l_val_base & ~0xfff, 0x1000);
+	if (!base)
+		return;
+
+	l = readl_relaxed(base + PLL_L_VAL_REG);
+	status = readl_relaxed(base + PLL_STATUS_REG);
+	iounmap(base);
+
+	if (!l || !(status & PLL_LOCK_DET)) {
+		pr_info("qcom-cpufreq: osm%d PLL not ready (l=%#x status=%#x), mux left alone\n",
+			index, l, status);
+		return;
+	}
+
+	qcom_cpufreq_hw_osm_gfmux(index, GFMUX_PLL_MAIN_VAL,
+				  "PLL main (boot)");
+}
+
 /**
  * qcom_cpufreq_hw_osm_setup() - Setup and enable the OSM
  *
@@ -1811,16 +1841,6 @@ static int qcom_cpufreq_hw_osm_setup(struct device *cpu_dev,
 	if (ret)
 		return ret;
 
-	/*
-	 * Only the performance cluster PLL can be reprogrammed here: the
-	 * bootloader already leaves the power cluster running *from* its PLL,
-	 * so writing L_VAL there would stop the clock under our own feet.
-	 */
-	if (index == 1) {
-		ret = qcom_cpufreq_hw_osm_pll_init(index);
-		if (ret)
-			return ret;
-	}
 
 	if (!osm_minimal) {
 		ret = qcom_cpufreq_hw_osm_seq_setup(qcom_cpufreq.pdev, drv_data,
@@ -1916,16 +1936,6 @@ static int qcom_cpufreq_hw_osm_setup(struct device *cpu_dev,
 	writel(1, drv_data->base + drv_data->soc_data->reg_enable);
 	udelay(OSM_BOOT_TIME_US);
 
-	/*
-	 * The OSM sequencer never comes alive on this platform, so nothing
-	 * ever moves the APCS general frequency mux off the always-on GPLL0
-	 * (the bootloader leaves the performance cluster there at ~300 MHz
-	 * while the power cluster already runs from its PLL).  Drive the mux
-	 * ourselves: the PLL was just programmed to 614.4 MHz above.
-	 */
-	if (index == 1)
-		qcom_cpufreq_hw_osm_gfmux(index, GFMUX_PLL_MAIN_VAL,
-					  "PLL main (boot)");
 
 	return 0;
 }
@@ -2208,6 +2218,16 @@ static int qcom_cpufreq_hw_driver_probe(struct platform_device *pdev)
 	 * device bound (which also keeps the iomap alive) and let userspace
 	 * trigger the bring-up through the osm_test attribute.
 	 */
+	/*
+	 * The OSM sequencer never comes alive on this platform, so nothing
+	 * ever moves the APCS general frequency mux off the always-on GPLL0.
+	 * The bootloader leaves the performance cluster on GPLL0/4 (307 MHz)
+	 * although its PLL is programmed and locked; switch the mux over to
+	 * it so the big cores run at ~1.2 GHz.
+	 */
+	if (qcom_cpufreq.soc_data->setup_regs)
+		qcom_cpufreq_hw_osm_pick_pll(1);
+
 	if (!osm_autostart && qcom_cpufreq.soc_data->setup_regs) {
 		dev_info(dev, "OSM autostart disabled, cpufreq stays unregistered\n");
 		return 0;
