@@ -1673,6 +1673,7 @@ static int qcom_cpufreq_hw_osm_gfmux(int index, u32 sel, const char *what)
 #define PLL_STATUS_REG		0x2c
 #define PLL_LOCK_DET		BIT(16)
 #define PLL_SETUP_L_VAL		0x20	/* 32 * 19.2 MHz = 614.4 MHz */
+#define PLL_BOOT_L_VAL		0x28	/* 1536 MHz, validated on sagit */
 
 static int qcom_cpufreq_hw_osm_pll_program(int index, u32 l_val)
 {
@@ -1779,6 +1780,19 @@ static void qcom_cpufreq_hw_osm_pick_pll(int index)
 		pr_info("qcom-cpufreq: osm%d PLL not ready (l=%#x status=%#x), mux left alone\n",
 			index, l, status);
 		return;
+	}
+
+	/*
+	 * Raise the PLL from whatever the bootloader picked (0x20, 1.2 GHz) to
+	 * 1536 MHz, which has been validated on this board.  The mux must not
+	 * point at the PLL while L_VAL is rewritten, so park it on GPLL0
+	 * first if the bootloader left it there.
+	 */
+	qcom_cpufreq_hw_osm_gfmux(index, GFMUX_GPLL_SEL_VAL, "GPLL0 (boot)");
+
+	if (l != PLL_BOOT_L_VAL) {
+		if (qcom_cpufreq_hw_osm_pll_program(index, PLL_BOOT_L_VAL))
+			return;
 	}
 
 	qcom_cpufreq_hw_osm_gfmux(index, GFMUX_PLL_MAIN_VAL,
@@ -2633,6 +2647,14 @@ static ssize_t osm_test_store(struct device *dev,
 	case 'H':
 		qcom_cpufreq_hw_osm_pll_set_l(1, 0x20);
 		return count;
+	case 'L': {
+		u8 l_val;
+
+		if (count < 3 || kstrtou8(&buf[1], 16, &l_val))
+			return -EINVAL;
+		qcom_cpufreq_hw_osm_pll_set_l(1, l_val);
+		return count;
+	}
 	case 's':
 		for (i = 0; i < qcom_cpufreq.num_domains; i++)
 			qcom_cpufreq_hw_osm_seq_setup(qcom_cpufreq.pdev,
