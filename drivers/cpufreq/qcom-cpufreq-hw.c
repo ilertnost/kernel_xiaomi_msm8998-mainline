@@ -315,7 +315,7 @@ static bool icc_scaling_enabled;
  * cluster long before the console is available. So the bring-up is
  * normally requested from userspace via the osm_test attribute instead.
  */
-static bool osm_autostart;
+static bool osm_autostart = true;
 static bool osm_minimal;
 module_param_named(osm_autostart, osm_autostart, bool, 0644);
 MODULE_PARM_DESC(osm_autostart, "Program and enable the OSM during probe");
@@ -1811,9 +1811,16 @@ static int qcom_cpufreq_hw_osm_setup(struct device *cpu_dev,
 	if (ret)
 		return ret;
 
-	ret = qcom_cpufreq_hw_osm_pll_init(index);
-	if (ret)
-		return ret;
+	/*
+	 * Only the performance cluster PLL can be reprogrammed here: the
+	 * bootloader already leaves the power cluster running *from* its PLL,
+	 * so writing L_VAL there would stop the clock under our own feet.
+	 */
+	if (index == 1) {
+		ret = qcom_cpufreq_hw_osm_pll_init(index);
+		if (ret)
+			return ret;
+	}
 
 	if (!osm_minimal) {
 		ret = qcom_cpufreq_hw_osm_seq_setup(qcom_cpufreq.pdev, drv_data,
