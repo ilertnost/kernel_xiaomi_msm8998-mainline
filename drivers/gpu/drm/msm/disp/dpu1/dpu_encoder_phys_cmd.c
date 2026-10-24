@@ -388,11 +388,18 @@ static void dpu_encoder_phys_cmd_tearcheck_config(
 				(mode->vtotal * drm_mode_vrefresh(mode));
 
 	/*
-	 * Set the sync_cfg_height to twice vtotal so that if we lose a
-	 * TE event coming from the display TE pin we won't stall immediately
+	 * sync_cfg_height is the height of the ping-pong vsync counter, i.e.
+	 * the emulated frame period: the counter wraps every sync_cfg_height
+	 * lines.  Upstream used vtotal * 2 as a safety margin against lost TE
+	 * events, but with hw_vsync_mode = 1 (internal vsync emulation, which
+	 * is what msm8998 uses since it has no INTF TE block) there is no
+	 * external TE event that can be lost - the counter is free running.
+	 * The doubled height simply makes every frame twice as long, so a
+	 * 60 Hz command-mode panel only gets frames at 30 Hz.  Match the
+	 * downstream Qualcomm/Xiaomi driver, which uses plain vtotal.
 	 */
 	tc_cfg.hw_vsync_mode = 1;
-	tc_cfg.sync_cfg_height = mode->vtotal * 2;
+	tc_cfg.sync_cfg_height = mode->vtotal;
 	tc_cfg.vsync_init_val = mode->vdisplay;
 	tc_cfg.sync_threshold_start = DEFAULT_TEARCHECK_SYNC_THRESH_START;
 	tc_cfg.sync_threshold_continue = DEFAULT_TEARCHECK_SYNC_THRESH_CONTINUE;
