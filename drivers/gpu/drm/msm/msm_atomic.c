@@ -16,28 +16,37 @@
  * Helpers to control vblanks while we flush.. basically just to ensure
  * that vblank accounting is switched on, so we get valid seqn/timestamp
  * on pageflip events (if requested)
+ *
+ * The active test happens on crtc->state, which the next commit can swap
+ * out from under us while the flush is in flight (we hold the commit
+ * locks, not the modeset locks).  vblank_get() therefore returns the mask
+ * of CRTCs it actually grabbed a reference for, and vblank_put() drops
+ * exactly that mask - releasing a reference for a CRTC whose state flipped
+ * to inactive mid-commit (or missing one that flipped to active) is what
+ * trips the refcount underflow warning in drm_vblank_put().
  */
 
-static void vblank_get(struct msm_kms *kms, unsigned crtc_mask)
+static unsigned vblank_get(struct msm_kms *kms, unsigned crtc_mask)
 {
 	struct drm_crtc *crtc;
+	unsigned taken = 0;
 
 	for_each_crtc_mask(kms->dev, crtc, crtc_mask) {
 		if (!crtc->state->active)
 			continue;
 		drm_crtc_vblank_get(crtc);
+		taken |= drm_crtc_mask(crtc);
 	}
+
+	return taken;
 }
 
 static void vblank_put(struct msm_kms *kms, unsigned crtc_mask)
 {
 	struct drm_crtc *crtc;
 
-	for_each_crtc_mask(kms->dev, crtc, crtc_mask) {
-		if (!crtc->state->active)
-			continue;
+	for_each_crtc_mask(kms->dev, crtc, crtc_mask)
 		drm_crtc_vblank_put(crtc);
-	}
 }
 
 static void lock_crtcs(struct msm_kms *kms, unsigned int crtc_mask)
@@ -62,6 +71,7 @@ static void unlock_crtcs(struct msm_kms *kms, unsigned int crtc_mask)
 static void msm_atomic_async_commit(struct msm_kms *kms, int crtc_idx)
 {
 	unsigned crtc_mask = BIT(crtc_idx);
+	unsigned vblank_mask;
 
 	trace_msm_atomic_async_commit_start(crtc_mask);
 
@@ -76,7 +86,7 @@ static void msm_atomic_async_commit(struct msm_kms *kms, int crtc_idx)
 
 	kms->funcs->enable_commit(kms);
 
-	vblank_get(kms, crtc_mask);
+	vblank_mask = vblank_get(kms, crtc_mask);
 
 	/*
 	 * Flush hardware updates:
@@ -91,7 +101,7 @@ static void msm_atomic_async_commit(struct msm_kms *kms, int crtc_idx)
 	kms->funcs->wait_flush(kms, crtc_mask);
 	trace_msm_atomic_wait_flush_finish(crtc_mask);
 
-	vblank_put(kms, crtc_mask);
+	vblank_put(kms, vblank_mask);
 
 	kms->funcs->complete_commit(kms, crtc_mask);
 	unlock_crtcs(kms, crtc_mask);
@@ -217,6 +227,7 @@ void msm_atomic_commit_tail(struct drm_atomic_commit *state)
 	struct msm_kms *kms = priv->kms;
 	struct drm_crtc *async_crtc = NULL;
 	unsigned crtc_mask = get_crtc_mask(state);
+	unsigned vblank_mask;
 	bool async = can_do_async(state, &async_crtc);
 
 	trace_msm_atomic_commit_tail_start(async, crtc_mask);
@@ -295,7 +306,7 @@ fallback:
 	 */
 	kms->pending_crtc_mask &= ~crtc_mask;
 
-	vblank_get(kms, crtc_mask);
+	vblank_mask = vblank_get(kms, crtc_mask);
 
 	/*
 	 * Flush hardware updates:
@@ -310,7 +321,7 @@ fallback:
 	kms->funcs->wait_flush(kms, crtc_mask);
 	trace_msm_atomic_wait_flush_finish(crtc_mask);
 
-	vblank_put(kms, crtc_mask);
+	vblank_put(kms, vblank_mask);
 
 	lock_crtcs(kms, crtc_mask);
 	kms->funcs->complete_commit(kms, crtc_mask);
