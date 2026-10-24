@@ -17,13 +17,13 @@
  * that vblank accounting is switched on, so we get valid seqn/timestamp
  * on pageflip events (if requested)
  *
- * The active test happens on crtc->state, which the next commit can swap
- * out from under us while the flush is in flight (we hold the commit
- * locks, not the modeset locks).  vblank_get() therefore returns the mask
- * of CRTCs it actually grabbed a reference for, and vblank_put() drops
- * exactly that mask - releasing a reference for a CRTC whose state flipped
- * to inactive mid-commit (or missing one that flipped to active) is what
- * trips the refcount underflow warning in drm_vblank_put().
+ * drm_crtc_vblank_get() fails with -EINVAL when the vblank counter is
+ * disabled - which is the normal state until someone (page flips, waits,
+ * the compositor) holds a reference - and then it does not take a
+ * reference either.  Only release what was actually acquired: putting
+ * anyway is what trips the refcount underflow warning in
+ * drm_vblank_put(), and with fbdev damage repaints feeding the console
+ * that warning loops on itself.
  */
 
 static unsigned vblank_get(struct msm_kms *kms, unsigned crtc_mask)
@@ -34,7 +34,8 @@ static unsigned vblank_get(struct msm_kms *kms, unsigned crtc_mask)
 	for_each_crtc_mask(kms->dev, crtc, crtc_mask) {
 		if (!crtc->state->active)
 			continue;
-		drm_crtc_vblank_get(crtc);
+		if (drm_crtc_vblank_get(crtc))
+			continue;
 		taken |= drm_crtc_mask(crtc);
 	}
 
