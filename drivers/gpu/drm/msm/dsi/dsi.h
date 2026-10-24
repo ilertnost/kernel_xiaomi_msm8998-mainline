@@ -136,6 +136,7 @@ struct msm_dsi_phy_shared_timings {
 struct msm_dsi_phy_clk_request {
 	unsigned long bitclk_rate;
 	unsigned long escclk_rate;
+	unsigned long pixelclk_rate;
 };
 
 void msm_dsi_phy_driver_register(void);

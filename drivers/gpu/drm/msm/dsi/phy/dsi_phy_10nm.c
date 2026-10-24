@@ -495,16 +495,52 @@ static int dsi_10nm_pll_restore_state(struct msm_dsi_phy *phy)
 	struct dsi_pll_10nm *pll_10nm = to_pll_10nm(phy->vco_hw);
 	struct pll_10nm_cached_state *cached = &pll_10nm->cached_state;
 	void __iomem *phy_base = pll_10nm->phy->base;
+	unsigned long vco = pll_10nm->vco_current_rate;
+	unsigned long bit_rate = phy->bitclk_req;
+	unsigned long pix_rate = phy->pixelclk_req;
+	u32 out_div_code = cached->pll_out_div;
+	u32 bit_div = cached->bit_clk_div;
+	u32 pix_div = cached->pix_clk_div;
 	u32 val;
 	int ret;
 
+	/*
+	 * The state cached at probe time holds the bootloader's dividers, but
+	 * the clock framework has programmed its own divisors before the PHY
+	 * reset and still believes them to be in effect (so it will not
+	 * re-program the PHY).  Recompute the dividers from the requested
+	 * rates, which are the ones the clock framework is using.
+	 */
+	if (vco && bit_rate && pix_rate) {
+		u32 ratio = DIV_ROUND_CLOSEST(vco, bit_rate);
+		u32 div, out_div = 1;
+		u32 bdiv, pdiv;
+
+		for (div = 1; div <= 8; div <<= 1) {
+			if (ratio % div)
+				continue;
+			out_div = div;
+		}
+
+		bdiv = ratio / out_div;
+		pdiv = DIV_ROUND_CLOSEST(bit_rate, pix_rate);
+
+		pr_info("DBG pll_restore: vco=%lu bit_req=%lu pix_req=%lu cached(out=%u bit=%u pix=%u mux=%u) calc(out=%u bit=%u pix=%u) byte=%lu dsiclk=%lu\n",
+			vco, bit_rate, pix_rate,
+			cached->pll_out_div, cached->bit_clk_div,
+			cached->pix_clk_div, cached->pll_mux,
+			out_div == 8 ? 3 : out_div == 4 ? 2 : out_div == 2 ? 1 : 0,
+			bdiv, pdiv,
+			vco / out_div / bdiv / 8,
+			vco / out_div / bdiv / pdiv);
+	}
+
 	val = readl(pll_10nm->phy->pll_base + REG_DSI_10nm_PHY_PLL_PLL_OUTDIV_RATE);
 	val &= ~0x3;
-	val |= cached->pll_out_div;
+	val |= out_div_code;
 	writel(val, pll_10nm->phy->pll_base + REG_DSI_10nm_PHY_PLL_PLL_OUTDIV_RATE);
 
-	writel(cached->bit_clk_div | (cached->pix_clk_div << 4),
-	       phy_base + REG_DSI_10nm_PHY_CMN_CLK_CFG0);
+	writel(bit_div | (pix_div << 4), phy_base + REG_DSI_10nm_PHY_CMN_CLK_CFG0);
 
 	val = readl(phy_base + REG_DSI_10nm_PHY_CMN_CLK_CFG1);
 	val &= ~0x3;
@@ -1034,3 +1070,77 @@ const struct msm_dsi_phy_cfg dsi_phy_10nm_8998_cfgs = {
 	.num_dsi_phy = 2,
 	.quirks = DSI_PHY_10NM_QUIRK_OLD_TIMINGS,
 };
+
+/*
+ * Debug knobs: allow tweaking the DSI PLL post-dividers from userspace.
+ * Not upstream material; used for bring-up only.
+ */
+static void dsi_10nm_dbg_field(unsigned int field, unsigned int val)
+{
+	struct dsi_pll_10nm *pll = pll_10nm_list[0];
+	void __iomem *base;
+	u32 v;
+
+	if (!pll || !pll->phy || !pll->phy->pll_on)
+		return;
+
+	base = pll->phy->base;
+
+	switch (field) {
+	case 0:	/* PLL out divider */
+		v = readl(pll->phy->pll_base + REG_DSI_10nm_PHY_PLL_PLL_OUTDIV_RATE);
+		v = (v & ~0x3) | (val & 0x3);
+		writel(v, pll->phy->pll_base +
+		       REG_DSI_10nm_PHY_PLL_PLL_OUTDIV_RATE);
+		break;
+	case 1:	/* bit clock divider */
+		v = readl(base + REG_DSI_10nm_PHY_CMN_CLK_CFG0);
+		v = (v & ~0xf) | (val & 0xf);
+		writel(v, base + REG_DSI_10nm_PHY_CMN_CLK_CFG0);
+		break;
+	case 2:	/* pixel clock divider */
+		v = readl(base + REG_DSI_10nm_PHY_CMN_CLK_CFG0);
+		v = (v & ~0xf0) | ((val & 0xf) << 4);
+		writel(v, base + REG_DSI_10nm_PHY_CMN_CLK_CFG0);
+		break;
+	case 3:	/* pixel clock mux */
+		v = readl(base + REG_DSI_10nm_PHY_CMN_CLK_CFG1);
+		v = (v & ~0x3) | (val & 0x3);
+		writel(v, base + REG_DSI_10nm_PHY_CMN_CLK_CFG1);
+		break;
+	}
+
+	pr_info("DBG phy_knob: field=%u val=%u cfg0=0x%x cfg1=0x%x outdiv=0x%x\n",
+		field, val,
+		readl(base + REG_DSI_10nm_PHY_CMN_CLK_CFG0),
+		readl(base + REG_DSI_10nm_PHY_CMN_CLK_CFG1),
+		readl(pll->phy->pll_base +
+		      REG_DSI_10nm_PHY_PLL_PLL_OUTDIV_RATE));
+}
+
+static unsigned int dbg_out_div, dbg_bit_div, dbg_pix_div, dbg_mux;
+
+static int dbg_knob_set(const char *val, const struct kernel_param *kp)
+{
+	unsigned int v;
+	int ret = kstrtouint(val, 0, &v);
+
+	if (ret)
+		return ret;
+
+	*(unsigned int *)kp->arg = v;
+	dsi_10nm_dbg_field(kp->arg == &dbg_out_div ? 0 :
+			   kp->arg == &dbg_bit_div ? 1 :
+			   kp->arg == &dbg_pix_div ? 2 : 3, v);
+	return 0;
+}
+
+static const struct kernel_param_ops dbg_knob_ops = {
+	.set = dbg_knob_set,
+	.get = param_get_uint,
+};
+
+module_param_cb(phy_out_div, &dbg_knob_ops, &dbg_out_div, 0644);
+module_param_cb(phy_bit_div, &dbg_knob_ops, &dbg_bit_div, 0644);
+module_param_cb(phy_pix_div, &dbg_knob_ops, &dbg_pix_div, 0644);
+module_param_cb(phy_mux, &dbg_knob_ops, &dbg_mux, 0644);

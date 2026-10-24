@@ -383,7 +383,22 @@ int dsi_link_clk_set_rate_6g(struct msm_dsi_host *msm_host)
 {
 	unsigned long byte_intf_clk_rate;
 	long rounded_byte_clk_rate;
+	long pclk_delta;
 	int ret;
+
+	/*
+	 * msm_dsi_host_xfer_prepare() calls us for every DSI command.  Once the
+	 * link already runs at the requested rates, reprogramming the PHY on
+	 * each transfer only glitches the running link - and
+	 * dev_pm_opp_set_rate() below would round the byte clock down to half
+	 * every time.  Leave the clocks alone once they are correct.
+	 */
+	pclk_delta = (long)clk_get_rate(msm_host->pixel_clk) -
+		     (long)msm_host->pixel_clk_rate;
+	if (msm_host->byte_clk_rate &&
+	    clk_get_rate(msm_host->byte_clk) == msm_host->byte_clk_rate &&
+	    pclk_delta > -1000 && pclk_delta < 1000)
+		return 0;
 
 	rounded_byte_clk_rate = clk_round_rate(msm_host->byte_clk,
 					       msm_host->byte_clk_rate);
@@ -392,6 +407,9 @@ int dsi_link_clk_set_rate_6g(struct msm_dsi_host *msm_host)
 		       __func__, rounded_byte_clk_rate);
 		return rounded_byte_clk_rate;
 	}
+
+	pr_info("DBG dsi_rate_6g: byte req=%lu rounded=%ld\n",
+		msm_host->byte_clk_rate, rounded_byte_clk_rate);
 
 	msm_host->byte_clk_rate = rounded_byte_clk_rate;
 
@@ -409,6 +427,24 @@ int dsi_link_clk_set_rate_6g(struct msm_dsi_host *msm_host)
 	if (ret) {
 		pr_err("%s: Failed to set rate pixel clk, %d\n", __func__, ret);
 		return ret;
+	}
+
+	pr_info("DBG dsi_rate_6g: after opp byte=%lu pclk=%lu (req pclk=%lu)\n",
+		clk_get_rate(msm_host->byte_clk),
+		clk_get_rate(msm_host->pixel_clk),
+		msm_host->pixel_clk_rate);
+
+	/*
+	 * dev_pm_opp_set_rate() may re-round the PHY dividers and leave the
+	 * byte clock at half the requested rate (observed on msm8998/10nm PHY
+	 * after the PLL is enabled).  Re-assert the exact rate.
+	 */
+	if (clk_get_rate(msm_host->byte_clk) != msm_host->byte_clk_rate) {
+		unsigned long before = clk_get_rate(msm_host->byte_clk);
+		int err = clk_set_rate(msm_host->byte_clk,
+				       msm_host->byte_clk_rate);
+		pr_info("DBG dsi_rate_6g: re-assert byte %lu -> %lu (err %d)\n",
+			before, clk_get_rate(msm_host->byte_clk), err);
 	}
 
 	if (msm_host->byte_intf_clk) {
@@ -519,6 +555,11 @@ int dsi_link_clk_set_rate_v2(struct msm_dsi_host *msm_host)
 		pr_err("%s: Failed to set rate pixel clk, %d\n", __func__, ret);
 		return ret;
 	}
+
+	pr_info("DBG dsi_set_rate_v2: byte %lu->%lu src %lu->%lu pclk %lu->%lu\n",
+		msm_host->byte_clk_rate, clk_get_rate(msm_host->byte_clk),
+		msm_host->src_clk_rate, clk_get_rate(msm_host->src_clk),
+		msm_host->pixel_clk_rate, clk_get_rate(msm_host->pixel_clk));
 
 	return 0;
 }
@@ -690,6 +731,14 @@ int dsi_calc_clk_rate_6g(struct msm_dsi_host *msm_host, bool is_bonded_dsi)
 	}
 
 	dsi_calc_pclk(msm_host, is_bonded_dsi);
+
+	pr_info("DBG dsi_calc_6g: bonded=%d lanes=%u bpp=%u modeclk=%u hd=%u ht=%u vd=%u vt=%u pclk=%lu byte=%lu\n",
+		is_bonded_dsi, msm_host->lanes,
+		mipi_dsi_pixel_format_to_bpp(msm_host->format),
+		msm_host->mode->clock, msm_host->mode->hdisplay,
+		msm_host->mode->htotal, msm_host->mode->vdisplay,
+		msm_host->mode->vtotal,
+		msm_host->pixel_clk_rate, msm_host->byte_clk_rate);
 	msm_host->esc_clk_rate = clk_get_rate(msm_host->esc_clk);
 	return 0;
 }
@@ -732,6 +781,11 @@ int dsi_calc_clk_rate_v2(struct msm_dsi_host *msm_host, bool is_bonded_dsi)
 		return -EINVAL;
 
 	msm_host->esc_clk_rate = msm_host->byte_clk_rate / esc_div;
+
+	pr_info("DBG dsi_calc_v2: bonded=%d lanes=%u bpp=%u pclk=%lu byte=%lu src=%lu esc=%lu\n",
+		is_bonded_dsi, msm_host->lanes, bpp, msm_host->pixel_clk_rate,
+		msm_host->byte_clk_rate, msm_host->src_clk_rate,
+		msm_host->esc_clk_rate);
 
 	DBG("esc=%lu, src=%lu", msm_host->esc_clk_rate,
 		msm_host->src_clk_rate);
@@ -2423,6 +2477,7 @@ void msm_dsi_host_get_phy_clk_req(struct mipi_dsi_host *host,
 	else
 		clk_req->bitclk_rate = msm_host->byte_clk_rate * 8;
 	clk_req->escclk_rate = msm_host->esc_clk_rate;
+	clk_req->pixelclk_rate = msm_host->pixel_clk_rate;
 }
 
 void msm_dsi_host_enable_irq(struct mipi_dsi_host *host)

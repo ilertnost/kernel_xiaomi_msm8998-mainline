@@ -760,6 +760,9 @@ int msm_dsi_phy_enable(struct msm_dsi_phy *phy,
 		goto reg_en_fail;
 	}
 
+	phy->bitclk_req = clk_req->bitclk_rate;
+	phy->pixelclk_req = clk_req->pixelclk_rate;
+
 	ret = phy->cfg->ops.enable(phy, clk_req);
 	if (ret) {
 		DRM_DEV_ERROR(dev, "%s: phy enable failed, %d\n", __func__, ret);

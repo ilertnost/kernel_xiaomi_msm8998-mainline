@@ -123,6 +123,9 @@ struct msm_dsi_phy {
 	struct clk_hw_onecell_data *provided_clocks;
 
 	bool state_saved;
+
+	unsigned long bitclk_req;
+	unsigned long pixelclk_req;
 };
 
 /*
