@@ -807,9 +807,15 @@
 	qcom,switching-freq = <800>;
 	qcom,ovp-millivolt = <29600>;
 	qcom,current-boost-limit = <970>;
-	qcom,current-limit-microamp = <25000>;
+	/*
+	 * The JDI panel used on sagit only has two LED strings connected.
+	 * Enabling all four makes the boost converter drive open strings and
+	 * trip the over-voltage protection continuously (~18k IRQs/s).
+	 * Matches qcom,led-strings-list = [00 01] in the downstream DTS.
+	 */
+	qcom,current-limit-microamp = <20000>;
 	/* Only one of num-strings / enabled-strings may be given. */
-	qcom,enabled-strings = <0 1 2 3>;
+	qcom,enabled-strings = <0 1>;
 };
 
 &ibb {
