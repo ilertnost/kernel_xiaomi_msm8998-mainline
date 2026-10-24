@@ -1086,6 +1086,7 @@ void dpu_crtc_commit_kickoff(struct drm_crtc *crtc)
 	struct dpu_crtc *dpu_crtc = to_dpu_crtc(crtc);
 	struct dpu_kms *dpu_kms = _dpu_crtc_get_kms(crtc);
 	struct dpu_crtc_state *cstate = to_dpu_crtc_state(crtc->state);
+	unsigned long flags;
 
 	/*
 	 * If no mixers has been allocated in dpu_crtc_atomic_check(),
@@ -1125,6 +1126,21 @@ void dpu_crtc_commit_kickoff(struct drm_crtc *crtc)
 			dpu_encoder_start_frame_done_timer(encoder);
 		}
 	}
+
+	/*
+	 * Arm the pending page flip to the next vblank instead of letting the
+	 * frame-done path signal it once the command-mode frame has been fully
+	 * transmitted. The DSI transfer takes almost a whole panel period, so
+	 * waiting for it leaves the compositor only a couple of milliseconds to
+	 * render the next frame and costs a full period per commit (i.e. it
+	 * halves the achievable frame rate).
+	 */
+	spin_lock_irqsave(&crtc->dev->event_lock, flags);
+	if (dpu_crtc->event) {
+		drm_crtc_arm_vblank_event(crtc, dpu_crtc->event);
+		dpu_crtc->event = NULL;
+	}
+	spin_unlock_irqrestore(&crtc->dev->event_lock, flags);
 
 	if (atomic_inc_return(&dpu_crtc->frame_pending) == 1) {
 		/* acquire bandwidth and other resources */
