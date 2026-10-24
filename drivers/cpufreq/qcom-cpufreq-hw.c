@@ -142,6 +142,23 @@
 #define ACD_WRITE_CTL_UPDATE_EN		BIT(0)
 #define ACD_WRITE_CTL_SELECT_SHIFT	1
 
+/*
+ * SAW AVS interface, one per cluster (saw-domain0/1 in DT).  The stock
+ * MSM8998 boot chain leaves the AVS interface disabled; with SAW control
+ * and limit registers at zero the OSM sequencer accepts the LUT and the
+ * desired index but never moves the cluster off the auxiliary clock
+ * (sequencer PC stuck at 0x188).  The vendor pm.dtsi programs both
+ * registers before the CPRh probes, so do the same here.
+ */
+#define SAW_AVS_VERSION_REG		0xfd0
+#define SAW_AVS_CONTROL_REG		0x904
+#define SAW_AVS_LIMIT_REG		0x908
+#define SAW_AVS_VERSION_4_1		0x40010000
+#define SAW_AVS_CONTROL_VAL		0x01010031
+
+/* Silver (domain 0) and Gold (domain 1) initial AVS voltage limits */
+static const u32 msm8998_saw_avs_limits[2] = { 0x04200420, 0x04700470 };
+
 
 struct qcom_cpufreq_soc_setup_data {
 	/* OSM physical register offset of the sequencer */
@@ -294,6 +311,9 @@ struct qcom_cpufreq_data {
 
 	/* Set once the OSM has been programmed for this domain */
 	bool osm_ready;
+
+	/* Number of valid LUT rows programmed for this domain */
+	u8 lut_entries;
 
 	/* msm8998: OSM votes have to go through the LLM override handshake */
 	bool llm_sw_override;
@@ -1174,6 +1194,7 @@ static int qcom_cpufreq_hw_write_lut(struct device *cpu_dev,
 			num_entries);
 		return -EINVAL;
 	}
+	ddata->lut_entries = num_entries;
 
 	for (i = 0; i < LUT_MAX_ENTRIES; i++) {
 		struct qcom_cpufreq_hw_params *entry;
@@ -1836,6 +1857,80 @@ static void msm8998_osm_enable_hmss_clks(struct device *dev)
 	}
 }
 
+/*
+ * Bring the SAW AVS interface of both clusters up.  Without the control
+ * and limit registers programmed the OSM sequencer never switches its
+ * cluster away from the auxiliary clock, no matter what the LUT and the
+ * desired index say - verified on sagit hardware, where the sequencer PC
+ * sits at 0x188 until SAW is initialized even though fuse calibration,
+ * CPRh and the LUT writes all succeed.
+ *
+ * Vendor order: limits first (0x908), then control (0x904), each with a
+ * readback.  Must run before the CPRh power domain applies corners.
+ */
+static int msm8998_saw_prepare(struct platform_device *pdev)
+{
+	static bool saw_ready;
+	char resname[] = "saw-domainX";
+	struct resource *rsrc;
+	void __iomem *base;
+	u32 version, val;
+	int index, i;
+
+	if (saw_ready)
+		return 0;
+
+	for (index = 0; index < qcom_cpufreq.num_domains; index++) {
+		if (index >= ARRAY_SIZE(msm8998_saw_avs_limits))
+			break;
+
+		snprintf(resname, sizeof(resname), "saw-domain%d", index);
+		rsrc = platform_get_resource_byname(pdev, IORESOURCE_MEM,
+						    resname);
+		if (!rsrc) {
+			dev_err(&pdev->dev, "%s: not present in DT\n", resname);
+			return -ENODEV;
+		}
+
+		base = ioremap(rsrc->start, resource_size(rsrc));
+		if (!base)
+			return -ENOMEM;
+
+		version = readl(base + SAW_AVS_VERSION_REG);
+		if ((version & 0xffff0000) != SAW_AVS_VERSION_4_1) {
+			dev_err(&pdev->dev,
+				"saw%d: unexpected AVS version %#x\n",
+				index, version);
+			iounmap(base);
+			return -ENODEV;
+		}
+
+		writel(msm8998_saw_avs_limits[index], base + SAW_AVS_LIMIT_REG);
+		writel(SAW_AVS_CONTROL_VAL, base + SAW_AVS_CONTROL_REG);
+
+		for (i = 0; i < 100; i++) {
+			val = readl(base + SAW_AVS_CONTROL_REG);
+			if (val == SAW_AVS_CONTROL_VAL)
+				break;
+			udelay(1);
+		}
+
+		dev_info(&pdev->dev,
+			 "saw%d: AVS version %#x control %#x limit %#x\n",
+			 index, version,
+			 readl(base + SAW_AVS_CONTROL_REG),
+			 readl(base + SAW_AVS_LIMIT_REG));
+
+		iounmap(base);
+
+		if (val != SAW_AVS_CONTROL_VAL)
+			return -ETIMEDOUT;
+	}
+
+	saw_ready = true;
+	return 0;
+}
+
 static int qcom_cpufreq_hw_osm_setup(struct device *cpu_dev,
 				     struct qcom_cpufreq_data *drv_data,
 				     int cpu_count, int index)
@@ -1854,6 +1949,10 @@ static int qcom_cpufreq_hw_osm_setup(struct device *cpu_dev,
 			return ret;
 		osm_clk_ready = true;
 	}
+
+	ret = msm8998_saw_prepare(qcom_cpufreq.pdev);
+	if (ret)
+		return ret;
 
 	ret = qcom_cpufreq_hw_write_lut(cpu_dev, drv_data, cpu_count, index);
 	if (ret)
@@ -1950,10 +2049,29 @@ static int qcom_cpufreq_hw_osm_setup(struct device *cpu_dev,
 	if (ret)
 		return ret;
 
+	/*
+	 * Start from the lowest corner: zero the desired index before the
+	 * enable, like the vendor boot flow does, so the sequencer never
+	 * latches a stale firmware vote on the way up.
+	 */
+	writel(0, drv_data->base + drv_data->soc_data->reg_perf_state);
+
 	/* We're ready: enable the OSM and give it time to boot (5 uS) */
 	writel(1, drv_data->base + drv_data->soc_data->reg_enable);
 	udelay(OSM_BOOT_TIME_US);
 
+	/*
+	 * Vote the boot corner right away.  The cluster this code may be
+	 * running on must not linger at the 300 MHz auxiliary source until
+	 * cpufreq registers, and the vendor flow also pushes both clusters
+	 * to their boot rate before handing control to the scheduler.
+	 */
+	if (drv_data->lut_entries > 1)
+		msm8998_osm_write_index(drv_data, drv_data->lut_entries - 1);
+
+	val = readl(drv_data->base + drv_data->soc_data->reg_perf_state);
+	dev_info(cpu_dev, "osm%d: enabled, desired index %#x (LUT %u rows)\n",
+		 index, val, drv_data->lut_entries);
 
 	return 0;
 }
